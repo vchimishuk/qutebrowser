@@ -808,16 +808,23 @@ class _WebEngineScripts(QObject):
 
     def connect_signals(self):
         config.instance.changed.connect(self._on_config_changed)
+        self._tab.url_changed.connect(self._update_stylesheet)
+        self._tab.load_finished.connect(self._on_load_finished)
 
     @pyqtSlot(str)
     def _on_config_changed(self, option):
         if option in ['scrolling.bar', 'content.user_stylesheets']:
             self._init_stylesheet()
-            self._update_stylesheet()
+            self._update_stylesheet(self._tab.url())
 
-    def _update_stylesheet(self):
+    @pyqtSlot()
+    def _on_load_finished(self):
+        self._update_stylesheet(self._tab.url())
+
+    @pyqtSlot(QUrl)
+    def _update_stylesheet(self, url):
         """Update the custom stylesheet in existing tabs."""
-        css = shared.get_user_stylesheet()
+        css = shared.get_user_stylesheet(url)
         code = javascript.assemble('stylesheet', 'set_css', css)
         self._tab.run_js_async(code)
 
@@ -888,7 +895,7 @@ class _WebEngineScripts(QObject):
         https://github.com/QupZilla/qupzilla/blob/v2.0/src/lib/app/mainapplication.cpp#L1063-L1101
         """
         self._remove_early_js('stylesheet')
-        css = shared.get_user_stylesheet()
+        css = shared.get_user_stylesheet(None)
         js_code = javascript.wrap_global(
             'stylesheet',
             utils.read_file('javascript/stylesheet.js'),
