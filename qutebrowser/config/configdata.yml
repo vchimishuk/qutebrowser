@@ -547,6 +547,11 @@ content.host_blocking.lists:
     - A zip-file of any of the above, with either only one file, or a file
       named `hosts` (with any extension).
 
+    It's also possible to add a local file or directory via a `file://` URL. In
+    case of a directory, all files in the directory are read as adblock lists.
+
+    The file `~/.config/qutebrowser/blocked-hosts` is always read if it exists.
+
 content.host_blocking.whitelist:
   default:
   - piwik.org
@@ -806,6 +811,17 @@ content.xss_auditing:
 
     Suspicious scripts will be blocked and reported in the inspector's
     JavaScript console.
+
+content.mute:
+  default: false
+  type: Bool
+  supports_pattern: true
+  desc: >-
+    Automatically mute tabs.
+
+    Note that if the `:tab-mute` command is used, the mute status for the
+    affected tab is now controlled manually, and this setting doesn't have any
+    effect.
 
 # emacs: '
 
@@ -1272,9 +1288,15 @@ prompt.radius:
 ## scrolling
 
 scrolling.bar:
-  type: Bool
-  default: false
-  desc: Show a scrollbar.
+  type:
+    name: String
+    valid_values:
+      - always: Always show the scrollbar.
+      - never: Never show the scrollbar.
+      - when-searching: Show the scrollbar when searching for text in the
+            webpage. With the QtWebKit backend, this is equal to `never`.
+  default: when-searching
+  desc: When to show the scrollbar.
 
 scrolling.smooth:
   type: Bool
@@ -1602,6 +1624,23 @@ tabs.min_width:
     This setting only applies when tabs are horizontal.
 
     This setting does not apply to pinned tabs, unless `tabs.pinned.shrink` is False.
+
+tabs.max_width:
+  default: -1
+  type:
+    name: Int
+    minval: -1
+    maxval: maxint
+  desc: >-
+    Maximum width (in pixels) of tabs (-1 for no maximum).
+
+    This setting only applies when tabs are horizontal.
+
+    This setting does not apply to pinned tabs, unless `tabs.pinned.shrink` is
+    False.
+
+    This setting may not apply properly if max_width is smaller than the
+    minimum size of tab contents, or smaller than tabs.min_width.
 
 tabs.width.indicator:
   renamed: tabs.indicator.width
@@ -2560,6 +2599,12 @@ bindings.default:
       tPH: config-cycle -p -u *://*.{url:host}/* content.plugins ;; reload
       tpu: config-cycle -p -t -u {url} content.plugins ;; reload
       tPu: config-cycle -p -u {url} content.plugins ;; reload
+      tih: config-cycle -p -t -u *://{url:host}/* content.images ;; reload
+      tIh: config-cycle -p -u *://{url:host}/* content.images ;; reload
+      tiH: config-cycle -p -t -u *://*.{url:host}/* content.images ;; reload
+      tIH: config-cycle -p -u *://*.{url:host}/* content.images ;; reload
+      tiu: config-cycle -p -t -u {url} content.images ;; reload
+      tIu: config-cycle -p -u {url} content.images ;; reload
     insert:
       <Ctrl-E>: open-editor
       <Shift-Ins>: insert-text {primary}
@@ -2605,6 +2650,7 @@ bindings.default:
     prompt:
       <Return>: prompt-accept
       <Ctrl-X>: prompt-open-download
+      <Ctrl-P>: prompt-open-download --pdfjs
       <Shift-Tab>: prompt-item-focus prev
       <Up>: prompt-item-focus prev
       <Tab>: prompt-item-focus next
