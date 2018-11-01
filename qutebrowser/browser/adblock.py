@@ -119,6 +119,11 @@ class HostBlocker:
             return False
 
         host = url.host()
+        u = url.toDisplayString()
+
+        if 'youtube.com/get_midroll_' in u:
+            return True
+
         return ((host in self._blocked_hosts or
                  host in self._config_blocked_hosts) and
                 not _is_whitelisted_url(url))
