@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -19,9 +19,16 @@
 
 """Function to return the url completion model for the `open` command."""
 
+import typing
+
+if typing.TYPE_CHECKING:
+    from PyQt5.QtCore import QAbstractItemModel
+
 from qutebrowser.completion.models import (completionmodel, listcategory,
                                            histcategory)
+from qutebrowser.browser import history
 from qutebrowser.utils import log, objreg
+from qutebrowser.config import config
 
 
 _URLCOL = 0
@@ -31,18 +38,17 @@ _TEXTCOL = 1
 def _delete_history(data):
     urlstr = data[_URLCOL]
     log.completion.debug('Deleting history entry {}'.format(urlstr))
-    hist = objreg.get('web-history')
-    hist.delete_url(urlstr)
+    history.web_history.delete_url(urlstr)
 
 
-def _delete_bookmark(data):
+def _delete_bookmark(data: typing.Sequence[str]) -> None:
     urlstr = data[_URLCOL]
     log.completion.debug('Deleting bookmark {}'.format(urlstr))
     bookmark_manager = objreg.get('bookmark-manager')
     bookmark_manager.delete(urlstr)
 
 
-def _delete_quickmark(data):
+def _delete_quickmark(data: typing.Sequence[str]) -> None:
     name = data[_TEXTCOL]
     quickmark_manager = objreg.get('quickmark-manager')
     log.completion.debug('Deleting quickmark {}'.format(name))
@@ -50,25 +56,48 @@ def _delete_quickmark(data):
 
 
 def url(*, info):
-    """A model which combines bookmarks, quickmarks and web history URLs.
+    """A model which combines various URLs.
+
+    This combines:
+    - bookmarks
+    - quickmarks
+    - search engines
+    - web history URLs
 
     Used for the `open` command.
     """
     model = completionmodel.CompletionModel(column_widths=(40, 50, 10))
 
+    # pylint: disable=bad-config-option
     quickmarks = [(url, name) for (name, url)
                   in objreg.get('quickmark-manager').marks.items()]
     bookmarks = objreg.get('bookmark-manager').marks.items()
+    searchengines = [(k, v) for k, v
+                     in sorted(config.val.url.searchengines.items())
+                     if k != 'DEFAULT']
+    # pylint: enable=bad-config-option
+    categories = config.val.completion.open_categories
+    models = {}  # type: typing.Dict[str, QAbstractItemModel]
 
-    if quickmarks:
-        model.add_category(listcategory.ListCategory(
+    if searchengines and 'searchengines' in categories:
+        models['searchengines'] = listcategory.ListCategory(
+            'Search engines', searchengines, sort=False)
+
+    if quickmarks and 'quickmarks' in categories:
+        models['quickmarks'] = listcategory.ListCategory(
             'Quickmarks', quickmarks, delete_func=_delete_quickmark,
-            sort=False))
-    if bookmarks:
-        model.add_category(listcategory.ListCategory(
-            'Bookmarks', bookmarks, delete_func=_delete_bookmark, sort=False))
+            sort=False)
+    if bookmarks and 'bookmarks' in categories:
+        models['bookmarks'] = listcategory.ListCategory(
+            'Bookmarks', bookmarks, delete_func=_delete_bookmark, sort=False)
 
-    if info.config.get('completion.web_history.max_items') != 0:
+    history_disabled = info.config.get('completion.web_history.max_items') == 0
+    if not history_disabled and 'history' in categories:
         hist_cat = histcategory.HistoryCategory(delete_func=_delete_history)
-        model.add_category(hist_cat)
+        models['history'] = hist_cat
+
+    for category in categories:
+        if category in models:
+            model.add_category(models[category])
+
     return model

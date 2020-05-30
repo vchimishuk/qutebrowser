@@ -1,7 +1,7 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
+# Copyright 2016-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 # Copyright 2015 Daniel Schadt
-# Copyright 2016-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -54,10 +54,11 @@ def generate_pdfjs_page(filename, url):
         url: The URL being opened.
     """
     if not is_available():
+        pdfjs_dir = os.path.join(standarddir.data(), 'pdfjs')
         return jinja.render('no_pdfjs.html',
                             url=url.toDisplayString(),
                             title="PDF.js not found",
-                            pdfjs_dir=os.path.join(standarddir.data(), 'pdfjs'))
+                            pdfjs_dir=pdfjs_dir)
     html = get_pdfjs_res('web/viewer.html').decode('utf-8')
 
     script = _generate_pdfjs_script(filename)
@@ -83,6 +84,9 @@ def _generate_pdfjs_script(filename):
     url_query.addQueryItem('filename', filename)
     url.setQuery(url_query)
 
+    js_url = javascript.to_js(
+        url.toString(QUrl.FullyEncoded))  # type: ignore[arg-type]
+
     return jinja.js_environment.from_string("""
         document.addEventListener("DOMContentLoaded", function() {
           if (typeof window.PDFJS !== 'undefined') {
@@ -104,7 +108,7 @@ def _generate_pdfjs_script(filename):
           viewer.open({{ url }});
         });
     """).render(
-        url=javascript.to_js(url.toString(QUrl.FullyEncoded)),
+        url=js_url,
         # WORKAROUND for https://bugreports.qt.io/browse/QTBUG-70420
         disable_create_object_url=(
             not qtutils.version_check('5.12') and
@@ -130,6 +134,8 @@ def get_pdfjs_res_and_path(path):
         # Debian pdf.js-common
         # Arch Linux pdfjs (AUR)
         '/usr/share/pdf.js/',
+        # Flatpak (Flathub)
+        '/app/share/pdf.js/',
         # Arch Linux pdf.js (AUR)
         '/usr/share/javascript/pdf.js/',
         # Debian libjs-pdf
@@ -155,6 +161,9 @@ def get_pdfjs_res_and_path(path):
         try:
             content = utils.read_file(res_path, binary=True)
         except FileNotFoundError:
+            raise PDFJSNotFound(path) from None
+        except OSError as e:
+            log.misc.warning("OSError while reading PDF.js file: {}".format(e))
             raise PDFJSNotFound(path) from None
 
     return content, file_path
@@ -227,14 +236,17 @@ def should_use_pdfjs(mimetype, url):
     is_download_url = (url.scheme() == 'blob' and
                        QUrl(url.path()).scheme() == 'qute')
     is_pdf = mimetype in ['application/pdf', 'application/x-pdf']
-    return is_pdf and not is_download_url and config.val.content.pdfjs
+    config_enabled = config.instance.get('content.pdfjs', url=url)
+    return is_pdf and not is_download_url and config_enabled
 
 
-def get_main_url(filename):
+def get_main_url(filename: str, original_url: QUrl) -> QUrl:
     """Get the URL to be opened to view a local PDF."""
     url = QUrl('qute://pdfjs/web/viewer.html')
     query = QUrlQuery()
     query.addQueryItem('filename', filename)  # read from our JS
     query.addQueryItem('file', '')  # to avoid pdfjs opening the default PDF
+    urlstr = original_url.toString(QUrl.FullyEncoded)  # type: ignore[arg-type]
+    query.addQueryItem('source', urlstr)
     url.setQuery(query)
     return url

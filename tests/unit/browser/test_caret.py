@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2018-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -25,14 +25,18 @@ import pytest
 from PyQt5.QtCore import QUrl
 
 from qutebrowser.utils import usertypes
+from qutebrowser.browser import browsertab
 
 
 @pytest.fixture
 def caret(web_tab, qtbot, mode_manager):
-    with qtbot.wait_signal(web_tab.load_finished):
-        web_tab.openurl(QUrl('qute://testdata/data/caret.html'))
+    web_tab.container.expose()
 
-    mode_manager.enter(usertypes.KeyMode.caret)
+    with qtbot.wait_signal(web_tab.load_finished, timeout=10000):
+        web_tab.load_url(QUrl('qute://testdata/data/caret.html'))
+
+    with qtbot.wait_signal(web_tab.caret.selection_toggled):
+        mode_manager.enter(usertypes.KeyMode.caret)
 
     return web_tab.caret
 
@@ -61,20 +65,38 @@ class Selection:
                     selection = selection.strip()
                 assert selection == expected
                 return
+            elif not selection and not expected:
+                return
 
             self._qtbot.wait(50)
+
+        assert False, 'Failed to get selection!'
 
     def check_multiline(self, expected, *, strip=False):
         self.check(textwrap.dedent(expected).strip(), strip=strip)
 
-    def toggle(self):
-        with self._qtbot.wait_signal(self._caret.selection_toggled):
-            self._caret.toggle_selection()
+    def toggle(self, *, line=False):
+        """Toggle the selection and return the new selection state."""
+        with self._qtbot.wait_signal(self._caret.selection_toggled) as blocker:
+            self._caret.toggle_selection(line=line)
+        return blocker.args[0]
 
 
 @pytest.fixture
 def selection(qtbot, caret):
     return Selection(qtbot, caret)
+
+
+def test_toggle(caret, selection, qtbot):
+    """Make sure calling toggleSelection produces the correct callback values.
+
+    This also makes sure that the SelectionState enum in JS lines up with the
+    Python browsertab.SelectionState enum.
+    """
+    assert selection.toggle() == browsertab.SelectionState.normal
+    assert selection.toggle(line=True) == browsertab.SelectionState.line
+    assert selection.toggle() == browsertab.SelectionState.normal
+    assert selection.toggle() == browsertab.SelectionState.none
 
 
 class TestDocument:
@@ -292,7 +314,6 @@ class TestSearch:
     @pytest.mark.qtbug60673
     @pytest.mark.no_xvfb
     def test_yanking_a_searched_line(self, caret, selection, mode_manager, web_tab, qtbot):
-        web_tab.show()
         mode_manager.leave(usertypes.KeyMode.caret)
 
         with qtbot.wait_callback() as callback:
@@ -306,7 +327,6 @@ class TestSearch:
     @pytest.mark.qtbug60673
     @pytest.mark.no_xvfb
     def test_yanking_a_searched_line_with_multiple_matches(self, caret, selection, mode_manager, web_tab, qtbot):
-        web_tab.show()
         mode_manager.leave(usertypes.KeyMode.caret)
 
         with qtbot.wait_callback() as callback:
@@ -357,3 +377,123 @@ class TestFollowSelected:
             with qtbot.wait_signal(caret.follow_selected_done):
                 caret.follow_selected()
         assert web_tab.url().path() == '/data/hello.txt'
+
+
+class TestReverse:
+
+    def test_does_not_change_selection(self, caret, selection):
+        selection.toggle()
+        caret.reverse_selection()
+        selection.check("")
+
+    def test_repetition_of_movement_results_in_empty_selection(self, caret, selection):
+        selection.toggle()
+        caret.move_to_end_of_word()
+        caret.reverse_selection()
+        caret.move_to_end_of_word()
+        selection.check("")
+
+    def test_reverse(self, caret, selection):
+        selection.toggle()
+        caret.move_to_end_of_word()
+        caret.reverse_selection()
+        caret.move_to_next_char()
+        selection.check("ne")
+        caret.reverse_selection()
+        caret.move_to_next_char()
+        selection.check("ne ")
+        caret.move_to_end_of_line()
+        selection.check("ne two three")
+        caret.reverse_selection()
+        caret.move_to_start_of_line()
+        selection.check("one two three")
+
+
+class TestLineSelection:
+
+    def test_toggle(self, caret, selection):
+        selection.toggle(line=True)
+        selection.check("one two three")
+
+    def test_toggle_untoggle(self, caret, selection):
+        selection.toggle()
+        selection.check("")
+        selection.toggle(line=True)
+        selection.check("one two three")
+        selection.toggle()
+        selection.check("one two three")
+
+    def test_from_center(self, caret, selection):
+        caret.move_to_next_char(4)
+        selection.toggle(line=True)
+        selection.check("one two three")
+
+    def test_more_lines(self, caret, selection):
+        selection.toggle(line=True)
+        caret.move_to_next_line(2)
+        selection.check_multiline("""
+            one two three
+            eins zwei drei
+
+            four five six
+        """, strip=True)
+
+    def test_not_selecting_char(self, caret, selection):
+        selection.toggle(line=True)
+        caret.move_to_next_char()
+        selection.check("one two three")
+        caret.move_to_prev_char()
+        selection.check("one two three")
+
+    def test_selecting_prev_next_word(self, caret, selection):
+        selection.toggle(line=True)
+        caret.move_to_next_word()
+        selection.check("one two three")
+        caret.move_to_prev_word()
+        selection.check("one two three")
+
+    def test_selecting_end_word(self, caret, selection):
+        selection.toggle(line=True)
+        caret.move_to_end_of_word()
+        selection.check("one two three")
+
+    def test_selecting_prev_next_line(self, caret, selection):
+        selection.toggle(line=True)
+        caret.move_to_next_line()
+        selection.check_multiline("""
+            one two three
+            eins zwei drei
+        """, strip=True)
+        caret.move_to_prev_line()
+        selection.check("one two three")
+
+    def test_not_selecting_start_end_line(self, caret, selection):
+        selection.toggle(line=True)
+        caret.move_to_end_of_line()
+        selection.check("one two three")
+        caret.move_to_start_of_line()
+        selection.check("one two three")
+
+    def test_selecting_block(self, caret, selection):
+        selection.toggle(line=True)
+        caret.move_to_end_of_next_block()
+        selection.check_multiline("""
+            one two three
+            eins zwei drei
+        """, strip=True)
+
+    @pytest.mark.not_mac(
+        reason='https://github.com/qutebrowser/qutebrowser/issues/5459')
+    def test_selecting_start_end_document(self, caret, selection):
+        selection.toggle(line=True)
+        caret.move_to_end_of_document()
+        selection.check_multiline("""
+            one two three
+            eins zwei drei
+
+            four five six
+            vier fünf sechs
+        """, strip=True)
+
+        caret.move_to_start_of_document()
+        selection.check("one two three")

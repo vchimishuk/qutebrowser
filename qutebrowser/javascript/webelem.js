@@ -1,5 +1,5 @@
 /**
- * Copyright 2016-2017 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+ * Copyright 2016-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
  *
  * This file is part of qutebrowser.
  *
@@ -214,7 +214,14 @@ window._qutebrowser.webelem = (function() {
     }
 
     funcs.find_css = (selector, only_visible) => {
-        const elems = document.querySelectorAll(selector);
+        let elems;
+
+        try {
+            elems = document.querySelectorAll(selector);
+        } catch (ex) {
+            return {"success": false, "error": ex.toString()};
+        }
+
         const subelem_frames = window.frames;
         const out = [];
 
@@ -239,11 +246,11 @@ window._qutebrowser.webelem = (function() {
             }
         }
 
-        return out;
+        return {"success": true, "result": out};
     };
 
     // Runs a function in a frame until the result is not null, then return
-    // If no frame succeds, return null
+    // If no frame succeeds, return null
     function run_frames(func) {
         for (let i = 0; i < window.frames.length; ++i) {
             const frame = window.frames[i];
@@ -403,6 +410,11 @@ window._qutebrowser.webelem = (function() {
         const elem = elements[id];
         elem.selectionStart = elem.value.length;
         elem.selectionEnd = elem.value.length;
+    };
+
+    funcs.delete = (id) => {
+        const elem = elements[id];
+        elem.remove();
     };
 
     return funcs;

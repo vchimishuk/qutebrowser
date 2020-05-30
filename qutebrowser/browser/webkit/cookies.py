@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -19,12 +19,18 @@
 
 """Handling of HTTP cookies."""
 
+import typing
+
 from PyQt5.QtNetwork import QNetworkCookie, QNetworkCookieJar
 from PyQt5.QtCore import pyqtSignal, QDateTime
 
 from qutebrowser.config import config
-from qutebrowser.utils import utils, standarddir, objreg
-from qutebrowser.misc import lineparser
+from qutebrowser.utils import utils, standarddir, objreg, log
+from qutebrowser.misc import lineparser, objects
+
+
+cookie_jar = None
+ram_cookie_jar = None
 
 
 class RAMCookieJar(QNetworkCookieJar):
@@ -50,7 +56,13 @@ class RAMCookieJar(QNetworkCookieJar):
         Return:
             True if one or more cookies are set for 'url', otherwise False.
         """
-        if config.val.content.cookies.accept == 'never':
+        accept = config.instance.get('content.cookies.accept', url=url)
+
+        if 'log-cookies' in objects.debug_flags:
+            log.network.debug('Cookie on {} -> applying setting {}'
+                              .format(url.toDisplayString(), accept))
+
+        if accept == 'never':
             return False
         else:
             self.changed.emit()
@@ -81,9 +93,10 @@ class CookieJar(RAMCookieJar):
 
     def parse_cookies(self):
         """Parse cookies from lineparser and store them."""
-        cookies = []
+        cookies = []  # type: typing.Sequence[QNetworkCookie]
         for line in self._lineparser:
-            cookies += QNetworkCookie.parseCookies(line)
+            line_cookies = QNetworkCookie.parseCookies(line)
+            cookies += line_cookies  # type: ignore[operator]
         self.setAllCookies(cookies)
 
     def purge_old_cookies(self):
@@ -92,7 +105,8 @@ class CookieJar(RAMCookieJar):
         # http://doc.qt.io/qt-5/qtwebkitexamples-webkitwidgets-browser-cookiejar-cpp.html
         now = QDateTime.currentDateTime()
         cookies = [c for c in self.allCookies()
-                   if c.isSessionCookie() or c.expirationDate() >= now]
+                   if c.isSessionCookie() or
+                   c.expirationDate() >= now]  # type: ignore[operator]
         self.setAllCookies(cookies)
 
     def save(self):
@@ -112,3 +126,10 @@ class CookieJar(RAMCookieJar):
             self._lineparser.data = []
             self._lineparser.save()
             self.changed.emit()
+
+
+def init(qapp):
+    """Initialize the global cookie jars."""
+    global cookie_jar, ram_cookie_jar
+    cookie_jar = CookieJar(qapp)
+    ram_cookie_jar = RAMCookieJar(qapp)

@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2016-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2016-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -21,6 +21,7 @@
 
 import sys
 import functools
+import typing
 
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QUrl
 from PyQt5.QtNetwork import (QNetworkProxy, QNetworkRequest, QHostInfo,
@@ -35,14 +36,10 @@ class ParseProxyError(Exception):
 
     """Error while parsing PAC result string."""
 
-    pass
-
 
 class EvalProxyError(Exception):
 
     """Error while evaluating PAC script."""
-
-    pass
 
 
 def _js_slot(*args):
@@ -68,7 +65,9 @@ def _js_slot(*args):
                 # pylint: disable=protected-access
                 return self._error_con.callAsConstructor([e])
                 # pylint: enable=protected-access
-        return pyqtSlot(*args, result=QJSValue)(new_method)
+
+        deco = pyqtSlot(*args, result=QJSValue)  # type: ignore[arg-type]
+        return deco(new_method)
     return _decorator
 
 
@@ -146,7 +145,8 @@ class PACResolver:
         config = [c.strip() for c in proxy_str.split(' ') if c]
         if not config:
             raise ParseProxyError("Empty proxy entry")
-        elif config[0] == "DIRECT":
+
+        if config[0] == "DIRECT":
             if len(config) != 1:
                 raise ParseProxyError("Invalid number of parameters for " +
                                       "DIRECT")
@@ -184,6 +184,8 @@ class PACResolver:
         """
         self._engine = QJSEngine()
 
+        self._engine.installExtensions(QJSEngine.ConsoleExtension)
+
         self._ctx = _PACContext(self._engine)
         self._engine.globalObject().setProperty(
             "PAC", self._engine.newQObject(self._ctx))
@@ -210,12 +212,15 @@ class PACResolver:
         Return:
             A list of QNetworkProxy objects in order of preference.
         """
+        qtutils.ensure_valid(query.url())
+
         if from_file:
             string_flags = QUrl.PrettyDecoded
         else:
-            string_flags = QUrl.RemoveUserInfo
+            string_flags = QUrl.RemoveUserInfo  # type: ignore[assignment]
             if query.url().scheme() == 'https':
-                string_flags |= QUrl.RemovePath | QUrl.RemoveQuery
+                string_flags |= QUrl.RemovePath  # type: ignore[assignment]
+                string_flags |= QUrl.RemoveQuery  # type: ignore[assignment]
 
         result = self._resolver.call([query.url().toString(string_flags),
                                       query.peerHostName()])
@@ -246,14 +251,14 @@ class PACFetcher(QObject):
         url.setScheme(url.scheme()[len(pac_prefix):])
 
         self._pac_url = url
-        self._manager = QNetworkAccessManager()
+        self._manager = QNetworkAccessManager(
+        )  # type: typing.Optional[QNetworkAccessManager]
         self._manager.setProxy(QNetworkProxy(QNetworkProxy.NoProxy))
         self._pac = None
         self._error_message = None
         self._reply = None
 
     def __eq__(self, other):
-        # pylint: disable=protected-access
         return self._pac_url == other._pac_url
 
     def __repr__(self):
@@ -261,11 +266,14 @@ class PACFetcher(QObject):
 
     def fetch(self):
         """Fetch the proxy from the remote URL."""
+        assert self._manager is not None
         self._reply = self._manager.get(QNetworkRequest(self._pac_url))
-        self._reply.finished.connect(self._finish)
+        self._reply.finished.connect(  # type: ignore[attr-defined]
+            self._finish)
 
     @pyqtSlot()
     def _finish(self):
+        assert self._reply is not None
         if self._reply.error() != QNetworkReply.NoError:
             error = "Can't fetch PAC file from URL, error code {}: {}"
             self._error_message = error.format(
@@ -313,6 +321,7 @@ class PACFetcher(QObject):
         Return a list of QNetworkProxy objects in order of preference.
         """
         self._wait()
+        assert self._pac is not None
         from_file = self._pac_url.scheme() == 'file'
         try:
             return self._pac.resolve(query, from_file=from_file)

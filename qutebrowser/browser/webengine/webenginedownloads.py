@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -24,7 +24,7 @@ import os.path
 import urllib
 import functools
 
-from PyQt5.QtCore import pyqtSlot, Qt
+from PyQt5.QtCore import pyqtSlot, Qt, QUrl, QObject
 from PyQt5.QtWebEngineWidgets import QWebEngineDownloadItem
 
 from qutebrowser.browser import downloads, pdfjs
@@ -39,11 +39,14 @@ class DownloadItem(downloads.AbstractDownloadItem):
         _qt_item: The wrapped item.
     """
 
-    def __init__(self, qt_item, parent=None):
+    def __init__(self, qt_item: QWebEngineDownloadItem,
+                 parent: QObject = None) -> None:
         super().__init__(parent)
         self._qt_item = qt_item
-        qt_item.downloadProgress.connect(self.stats.on_download_progress)
-        qt_item.stateChanged.connect(self._on_state_changed)
+        qt_item.downloadProgress.connect(  # type: ignore[attr-defined]
+            self.stats.on_download_progress)
+        qt_item.stateChanged.connect(  # type: ignore[attr-defined]
+            self._on_state_changed)
 
         # Ensure wrapped qt_item is deleted manually when the wrapper object
         # is deleted. See https://github.com/qutebrowser/qutebrowser/issues/3373
@@ -92,7 +95,8 @@ class DownloadItem(downloads.AbstractDownloadItem):
                              "{}".format(state_name))
 
     def _do_die(self):
-        self._qt_item.downloadProgress.disconnect()
+        progress_signal = self._qt_item.downloadProgress
+        progress_signal.disconnect()  # type: ignore[attr-defined]
         if self._qt_item.state() != QWebEngineDownloadItem.DownloadInterrupted:
             self._qt_item.cancel()
 
@@ -117,8 +121,10 @@ class DownloadItem(downloads.AbstractDownloadItem):
     def _get_open_filename(self):
         return self._filename
 
-    def _set_fileobj(self, fileobj, *,
-                     autoclose=True):  # pylint: disable=unused-argument
+    def url(self) -> QUrl:
+        return self._qt_item.url()
+
+    def _set_fileobj(self, fileobj, *, autoclose=True):
         raise downloads.UnsupportedOperationError
 
     def _set_tempfile(self, fileobj):
@@ -150,6 +156,7 @@ class DownloadItem(downloads.AbstractDownloadItem):
 
     def _ask_create_parent_question(self, title, msg,
                                     force_overwrite, remember_directory):
+        assert self._filename is not None
         no_action = functools.partial(self.cancel, remove_data=False)
         question = usertypes.Question()
         question.title = title
@@ -166,7 +173,16 @@ class DownloadItem(downloads.AbstractDownloadItem):
         message.global_bridge.ask(question, blocking=True)
 
     def _after_set_filename(self):
-        self._qt_item.setPath(self._filename)
+        assert self._filename is not None
+
+        dirname, basename = os.path.split(self._filename)
+        try:
+            # Qt 5.14
+            self._qt_item.setDownloadDirectory(dirname)
+            self._qt_item.setDownloadFileName(basename)
+        except AttributeError:
+            self._qt_item.setPath(self._filename)
+
         self._qt_item.accept()
 
 
@@ -181,7 +197,21 @@ def _get_suggested_filename(path):
     See https://bugreports.qt.io/browse/QTBUG-56978
     """
     filename = os.path.basename(path)
-    filename = re.sub(r'\([0-9]+\)(?=\.|$)', '', filename)
+
+    suffix_re = re.compile(r"""
+      \ ?  # Optional space between filename and suffix
+      (
+        # Numerical suffix
+        \([0-9]+\)
+      |
+        # ISO-8601 suffix
+        # https://cs.chromium.org/chromium/src/base/time/time_to_iso8601.cc
+        \ -\ \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z
+      )
+      (?=\.|$)  # Begin of extension, or filename without extension
+    """, re.VERBOSE)
+
+    filename = suffix_re.sub('', filename)
     if not qtutils.version_check('5.9', compiled=False):
         # https://bugreports.qt.io/browse/QTBUG-58155
         filename = urllib.parse.unquote(filename)

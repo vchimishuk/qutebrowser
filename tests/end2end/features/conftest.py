@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2015-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2015-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -20,6 +20,7 @@
 """Steps for bdd-like tests."""
 
 import os
+import os.path
 import re
 import sys
 import time
@@ -27,11 +28,14 @@ import json
 import logging
 import collections
 import textwrap
+import subprocess
+import shutil
 
 import pytest
 import pytest_bdd as bdd
 
-from qutebrowser.utils import log, utils
+import qutebrowser
+from qutebrowser.utils import log, utils, docutils
 from qutebrowser.browser import pdfjs
 from helpers import utils as testutils
 
@@ -46,7 +50,7 @@ def _get_echo_exe_path():
         return os.path.join(testutils.abs_datapath(), 'userscripts',
                             'echo.bat')
     else:
-        return 'echo'
+        return shutil.which("echo")
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -148,6 +152,17 @@ def run_command_given(quteproc, command):
     quteproc.send_cmd(command)
 
 
+@bdd.given(bdd.parsers.parse("I also run {command}"))
+def run_command_given_2(quteproc, command):
+    """Run a qutebrowser command.
+
+    Separate from the above as a hack to run two commands in a Background
+    without having to use ";;". This is needed because pytest-bdd doesn't allow
+    re-using a Given step...
+    """
+    quteproc.send_cmd(command)
+
+
 @bdd.given("I have a fresh instance")
 def fresh_instance(quteproc):
     """Restart qutebrowser instance for tests needing a fresh state."""
@@ -166,7 +181,7 @@ def clean_open_tabs(quteproc):
 
 
 @bdd.given('pdfjs is available')
-def pdfjs_available():
+def pdfjs_available(data_tmpdir):
     if not pdfjs.is_available():
         pytest.skip("No pdfjs installation found.")
 
@@ -380,6 +395,32 @@ def clear_ssl_errors(request, quteproc):
         quteproc.start()
     else:
         quteproc.send_cmd(':debug-clear-ssl-errors')
+
+
+@bdd.when("the documentation is up to date")
+def update_documentation():
+    """Update the docs before testing :help."""
+    base_path = os.path.dirname(os.path.abspath(qutebrowser.__file__))
+    doc_path = os.path.join(base_path, 'html', 'doc')
+    script_path = os.path.join(base_path, '..', 'scripts')
+
+    try:
+        os.mkdir(doc_path)
+    except FileExistsError:
+        pass
+
+    files = os.listdir(doc_path)
+    if files and all(docutils.docs_up_to_date(p) for p in files):
+        return
+
+    try:
+        subprocess.run(['asciidoc'], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=True)
+    except OSError:
+        pytest.skip("Docs outdated and asciidoc unavailable!")
+
+    update_script = os.path.join(script_path, 'asciidoc2html.py')
+    subprocess.run([sys.executable, update_script], check=True)
 
 
 ## Then
@@ -646,4 +687,12 @@ def check_not_scrolled(request, quteproc):
 @bdd.then(bdd.parsers.parse("the option {option} should be set to {value}"))
 def check_option(quteproc, option, value):
     actual_value = quteproc.get_setting(option)
+    assert actual_value == value
+
+
+@bdd.then(bdd.parsers.parse("the per-domain option {option} should be set to "
+                            "{value} for {pattern}"))
+def check_option_per_domain(quteproc, option, value, pattern, server):
+    pattern = pattern.replace('(port)', str(server.port))
+    actual_value = quteproc.get_setting(option, pattern=pattern)
     assert actual_value == value
