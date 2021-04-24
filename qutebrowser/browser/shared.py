@@ -315,14 +315,16 @@ def get_tab(win_id, target):
     return tabbed_browser.tabopen(url=None, background=bg_tab)
 
 
-def get_user_stylesheet(searching=False):
+def get_user_stylesheet(url, searching=False):
     """Get the combined user-stylesheet."""
     css = ''
-    stylesheets = config.val.content.user_stylesheets
 
-    for filename in stylesheets:
-        with open(filename, 'r', encoding='utf-8') as f:
-            css += f.read()
+    if url and not url.isEmpty():
+        stylesheets = config.instance.get('content.user_stylesheets', url)
+        if stylesheets is not usertypes.UNSET:
+            for filename in stylesheets:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    css += f.read()
 
     setting = config.val.scrolling.bar
     if setting == 'overlay' and utils.is_mac:
