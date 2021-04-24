@@ -1,0 +1,9 @@
+hunter
+pympler
+github3.py
+bump2version
+requests
+pyqt-builder
+
+# Already included via test requirements
+#@ ignore: urllib3

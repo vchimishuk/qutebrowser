@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2016-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2016-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
 
@@ -53,26 +53,26 @@ class TestFileCompletion:
         (2, 'next', 'a'),
         (2, 'prev', 'b'),
     ])
-    def test_simple_completion(self, tmpdir, get_prompt, steps, where,
+    def test_simple_completion(self, tmp_path, get_prompt, steps, where,
                                subfolder):
         """Simply trying to tab through items."""
-        testdir = tmpdir / 'test'
+        testdir = tmp_path / 'test'
         for directory in 'abc':
-            (testdir / directory).ensure(dir=True)
+            (testdir / directory).mkdir(parents=True)
 
         prompt = get_prompt(str(testdir) + os.sep)
 
         for _ in range(steps):
             prompt.item_focus(where)
 
-        assert prompt._lineedit.text() == str(testdir / subfolder)
+        assert prompt._lineedit.text() == str((testdir / subfolder).resolve())
 
-    def test_backspacing_path(self, qtbot, tmpdir, get_prompt):
+    def test_backspacing_path(self, qtbot, tmp_path, get_prompt):
         """When we start deleting a path we want to see the subdir."""
-        testdir = tmpdir / 'test'
+        testdir = tmp_path / 'test'
 
         for directory in ['bar', 'foo']:
-            (testdir / directory).ensure(dir=True)
+            (testdir / directory).mkdir(parents=True)
 
         prompt = get_prompt(str(testdir / 'foo') + os.sep)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 
 # This file is part of qutebrowser.
 #
@@ -16,7 +16,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Run pylint on tests.
 
@@ -57,6 +57,8 @@ def main():
         'missing-docstring',
         'protected-access',
         'len-as-condition',
+        'compare-to-empty-string',
+        'pointless-statement',
         # directories without __init__.py...
         'import-error',
     ]
@@ -75,7 +77,7 @@ def main():
     env = os.environ.copy()
     env['PYTHONPATH'] = os.pathsep.join(pythonpath)
 
-    ret = subprocess.run(['pylint'] + args, env=env).returncode
+    ret = subprocess.run(['pylint'] + args, env=env, check=False).returncode
     return ret
 
 

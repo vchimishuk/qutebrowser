@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Other utilities which don't fit anywhere else."""
 
@@ -30,35 +30,124 @@ import datetime
 import traceback
 import functools
 import contextlib
-import socket
 import shlex
-import glob
 import mimetypes
+from typing import (Any, Callable, IO, Iterator,
+                    Optional, Sequence, Tuple, Type, Union,
+                    TypeVar, TYPE_CHECKING)
+try:
+    # Protocol was added in Python 3.8
+    from typing import Protocol
+except ImportError:  # pragma: no cover
+    if not TYPE_CHECKING:
+        class Protocol:
 
-from PyQt5.QtCore import QUrl
-from PyQt5.QtGui import QColor, QClipboard, QDesktopServices
+            """Empty stub at runtime."""
+
+from PyQt5.QtCore import QUrl, QVersionNumber, QRect
+from PyQt5.QtGui import QClipboard, QDesktopServices
 from PyQt5.QtWidgets import QApplication
-import pkg_resources
+
 import yaml
 try:
-    from yaml import CSafeLoader as YamlLoader, CSafeDumper as YamlDumper
+    from yaml import (CSafeLoader as YamlLoader,
+                      CSafeDumper as YamlDumper)
     YAML_C_EXT = True
 except ImportError:  # pragma: no cover
-    from yaml import SafeLoader as YamlLoader, SafeDumper as YamlDumper
+    from yaml import (SafeLoader as YamlLoader,  # type: ignore[misc]
+                      SafeDumper as YamlDumper)
     YAML_C_EXT = False
 
-import qutebrowser
-from qutebrowser.utils import qtutils, log
-
+from qutebrowser.utils import log
 
 fake_clipboard = None
 log_clipboard = False
-_resource_cache = {}
 
 is_mac = sys.platform.startswith('darwin')
 is_linux = sys.platform.startswith('linux')
 is_windows = sys.platform.startswith('win')
 is_posix = os.name == 'posix'
+
+_C = TypeVar("_C", bound="Comparable")
+
+
+class Comparable(Protocol):
+
+    """Protocol for a "comparable" object."""
+
+    def __lt__(self: _C, other: _C) -> bool:
+        ...
+
+    def __ge__(self: _C, other: _C) -> bool:
+        ...
+
+
+class VersionNumber:
+
+    """A representation of a version number."""
+
+    def __init__(self, *args: int) -> None:
+        self._ver = QVersionNumber(args)  # not *args, to support >3 components
+        if self._ver.isNull():
+            raise ValueError("Can't construct a null version")
+
+        normalized = self._ver.normalized()
+        if normalized != self._ver:
+            raise ValueError(
+                f"Refusing to construct non-normalized version from {args} "
+                f"(normalized: {tuple(normalized.segments())}).")
+
+        self.major = self._ver.majorVersion()
+        self.minor = self._ver.minorVersion()
+        self.patch = self._ver.microVersion()
+        self.segments = self._ver.segments()
+
+    def __str__(self) -> str:
+        return ".".join(str(s) for s in self.segments)
+
+    def __repr__(self) -> str:
+        args = ", ".join(str(s) for s in self.segments)
+        return f'VersionNumber({args})'
+
+    def strip_patch(self) -> 'VersionNumber':
+        """Get a new VersionNumber with the patch version removed."""
+        return VersionNumber(*self.segments[:2])
+
+    @classmethod
+    def parse(cls, s: str) -> 'VersionNumber':
+        """Parse a version number from a string."""
+        ver, _suffix = QVersionNumber.fromString(s)
+        # FIXME: Should we support a suffix?
+
+        if ver.isNull():
+            raise ValueError(f"Failed to parse {s}")
+
+        return cls(*ver.normalized().segments())
+
+    def __hash__(self) -> int:
+        return hash(self._ver)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, VersionNumber):
+            return NotImplemented
+        return self._ver == other._ver
+
+    def __ne__(self, other: object) -> bool:
+        if not isinstance(other, VersionNumber):
+            return NotImplemented
+        return self._ver != other._ver
+
+    def __ge__(self, other: 'VersionNumber') -> bool:
+        return self._ver >= other._ver  # type: ignore[operator]
+
+    def __gt__(self, other: 'VersionNumber') -> bool:
+        return self._ver > other._ver  # type: ignore[operator]
+
+    def __le__(self, other: 'VersionNumber') -> bool:
+        return self._ver <= other._ver  # type: ignore[operator]
+
+    def __lt__(self, other: 'VersionNumber') -> bool:
+        return self._ver < other._ver  # type: ignore[operator]
 
 
 class Unreachable(Exception):
@@ -75,7 +164,7 @@ class SelectionUnsupportedError(ClipboardError):
 
     """Raised if [gs]et_clipboard is used and selection=True is unsupported."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__("Primary selection is not supported on this "
                          "platform!")
 
@@ -85,7 +174,7 @@ class ClipboardEmptyError(ClipboardError):
     """Raised if get_clipboard is used and the clipboard is empty."""
 
 
-def elide(text, length):
+def elide(text: str, length: int) -> str:
     """Elide text so it uses a maximum of length chars."""
     if length < 1:
         raise ValueError("length must be >= 1!")
@@ -95,7 +184,7 @@ def elide(text, length):
         return text[:length - 1] + '\u2026'
 
 
-def elide_filename(filename, length):
+def elide_filename(filename: str, length: int) -> str:
     """Elide a filename to the given length.
 
     The difference to the elide() is that the text is removed from
@@ -127,7 +216,7 @@ def elide_filename(filename, length):
         return filename[:left] + elidestr + filename[-right:]
 
 
-def compact_text(text, elidelength=None):
+def compact_text(text: str, elidelength: int = None) -> str:
     """Remove leading whitespace and newlines from a text and maybe elide it.
 
     Args:
@@ -143,131 +232,7 @@ def compact_text(text, elidelength=None):
     return out
 
 
-def preload_resources():
-    """Load resource files into the cache."""
-    for subdir, pattern in [('html', '*.html'), ('javascript', '*.js')]:
-        path = resource_filename(subdir)
-        for full_path in glob.glob(os.path.join(path, pattern)):
-            sub_path = '/'.join([subdir, os.path.basename(full_path)])
-            _resource_cache[sub_path] = read_file(sub_path)
-
-
-def read_file(filename, binary=False):
-    """Get the contents of a file contained with qutebrowser.
-
-    Args:
-        filename: The filename to open as string.
-        binary: Whether to return a binary string.
-                If False, the data is UTF-8-decoded.
-
-    Return:
-        The file contents as string.
-    """
-    if not binary and filename in _resource_cache:
-        return _resource_cache[filename]
-
-    if hasattr(sys, 'frozen'):
-        # PyInstaller doesn't support pkg_resources :(
-        # https://github.com/pyinstaller/pyinstaller/wiki/FAQ#misc
-        fn = os.path.join(os.path.dirname(sys.executable), filename)
-        if binary:
-            with open(fn, 'rb') as f:
-                return f.read()
-        else:
-            with open(fn, 'r', encoding='utf-8') as f:
-                return f.read()
-    else:
-        data = pkg_resources.resource_string(qutebrowser.__name__, filename)
-        if not binary:
-            data = data.decode('UTF-8')
-        return data
-
-
-def resource_filename(filename):
-    """Get the absolute filename of a file contained with qutebrowser.
-
-    Args:
-        filename: The filename.
-
-    Return:
-        The absolute filename.
-    """
-    if hasattr(sys, 'frozen'):
-        return os.path.join(os.path.dirname(sys.executable), filename)
-    return pkg_resources.resource_filename(qutebrowser.__name__, filename)
-
-
-def _get_color_percentage(a_c1, a_c2, a_c3, b_c1, b_c2, b_c3, percent):
-    """Get a color which is percent% interpolated between start and end.
-
-    Args:
-        a_c1, a_c2, a_c3: Start color components (R, G, B / H, S, V / H, S, L)
-        b_c1, b_c2, b_c3: End color components (R, G, B / H, S, V / H, S, L)
-        percent: Percentage to interpolate, 0-100.
-                 0: Start color will be returned.
-                 100: End color will be returned.
-
-    Return:
-        A (c1, c2, c3) tuple with the interpolated color components.
-    """
-    if not 0 <= percent <= 100:
-        raise ValueError("percent needs to be between 0 and 100!")
-    out_c1 = round(a_c1 + (b_c1 - a_c1) * percent / 100)
-    out_c2 = round(a_c2 + (b_c2 - a_c2) * percent / 100)
-    out_c3 = round(a_c3 + (b_c3 - a_c3) * percent / 100)
-    return (out_c1, out_c2, out_c3)
-
-
-def interpolate_color(start, end, percent, colorspace=QColor.Rgb):
-    """Get an interpolated color value.
-
-    Args:
-        start: The start color.
-        end: The end color.
-        percent: Which value to get (0 - 100)
-        colorspace: The desired interpolation color system,
-                    QColor::{Rgb,Hsv,Hsl} (from QColor::Spec enum)
-                    If None, start is used except when percent is 100.
-
-    Return:
-        The interpolated QColor, with the same spec as the given start color.
-    """
-    qtutils.ensure_valid(start)
-    qtutils.ensure_valid(end)
-
-    if colorspace is None:
-        if percent == 100:
-            return QColor(*end.getRgb())
-        else:
-            return QColor(*start.getRgb())
-
-    out = QColor()
-    if colorspace == QColor.Rgb:
-        a_c1, a_c2, a_c3, _alpha = start.getRgb()
-        b_c1, b_c2, b_c3, _alpha = end.getRgb()
-        components = _get_color_percentage(a_c1, a_c2, a_c3, b_c1, b_c2, b_c3,
-                                           percent)
-        out.setRgb(*components)
-    elif colorspace == QColor.Hsv:
-        a_c1, a_c2, a_c3, _alpha = start.getHsv()
-        b_c1, b_c2, b_c3, _alpha = end.getHsv()
-        components = _get_color_percentage(a_c1, a_c2, a_c3, b_c1, b_c2, b_c3,
-                                           percent)
-        out.setHsv(*components)
-    elif colorspace == QColor.Hsl:
-        a_c1, a_c2, a_c3, _alpha = start.getHsl()
-        b_c1, b_c2, b_c3, _alpha = end.getHsl()
-        components = _get_color_percentage(a_c1, a_c2, a_c3, b_c1, b_c2, b_c3,
-                                           percent)
-        out.setHsl(*components)
-    else:
-        raise ValueError("Invalid colorspace!")
-    out = out.convertTo(start.spec())
-    qtutils.ensure_valid(out)
-    return out
-
-
-def format_seconds(total_seconds):
+def format_seconds(total_seconds: int) -> str:
     """Format a count of seconds to get a [H:]M:SS string."""
     prefix = '-' if total_seconds < 0 else ''
     hours, rem = divmod(abs(round(total_seconds)), 3600)
@@ -283,10 +248,10 @@ def format_seconds(total_seconds):
     return prefix + ':'.join(chunks)
 
 
-def format_size(size, base=1024, suffix=''):
+def format_size(size: Optional[float], base: int = 1024, suffix: str = '') -> str:
     """Format a byte size so it's human readable.
 
-    Inspired by http://stackoverflow.com/q/1094841
+    Inspired by https://stackoverflow.com/q/1094841
     """
     prefixes = ['', 'k', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y']
     if size is None:
@@ -302,13 +267,13 @@ class FakeIOStream(io.TextIOBase):
 
     """A fake file-like stream which calls a function for write-calls."""
 
-    def __init__(self, write_func):
+    def __init__(self, write_func: Callable[[str], int]) -> None:
         super().__init__()
-        self.write = write_func
+        self.write = write_func  # type: ignore[assignment]
 
 
 @contextlib.contextmanager
-def fake_io(write_func):
+def fake_io(write_func: Callable[[str], int]) -> Iterator[None]:
     """Run code with stdout and stderr replaced by FakeIOStreams.
 
     Args:
@@ -318,21 +283,21 @@ def fake_io(write_func):
     old_stderr = sys.stderr
     fake_stderr = FakeIOStream(write_func)
     fake_stdout = FakeIOStream(write_func)
-    sys.stderr = fake_stderr
-    sys.stdout = fake_stdout
+    sys.stderr = fake_stderr  # type: ignore[assignment]
+    sys.stdout = fake_stdout  # type: ignore[assignment]
     try:
         yield
     finally:
         # If the code we did run did change sys.stdout/sys.stderr, we leave it
         # unchanged. Otherwise, we reset it.
-        if sys.stdout is fake_stdout:
+        if sys.stdout is fake_stdout:  # type: ignore[comparison-overlap]
             sys.stdout = old_stdout
-        if sys.stderr is fake_stderr:
+        if sys.stderr is fake_stderr:  # type: ignore[comparison-overlap]
             sys.stderr = old_stderr
 
 
 @contextlib.contextmanager
-def disabled_excepthook():
+def disabled_excepthook() -> Iterator[None]:
     """Run code with the exception hook temporarily disabled."""
     old_excepthook = sys.excepthook
     sys.excepthook = sys.__excepthook__
@@ -365,7 +330,7 @@ class prevent_exceptions:  # noqa: N801,N806 pylint: disable=invalid-name
         _predicate: The condition which needs to be True to prevent exceptions
     """
 
-    def __init__(self, retval, predicate=True):
+    def __init__(self, retval: Any, predicate: bool = True) -> None:
         """Save decorator arguments.
 
         Gets called on parse-time with the decorator arguments.
@@ -376,7 +341,7 @@ class prevent_exceptions:  # noqa: N801,N806 pylint: disable=invalid-name
         self._retval = retval
         self._predicate = predicate
 
-    def __call__(self, func):
+    def __call__(self, func: Callable) -> Callable:
         """Called when a function should be decorated.
 
         Args:
@@ -391,7 +356,7 @@ class prevent_exceptions:  # noqa: N801,N806 pylint: disable=invalid-name
         retval = self._retval
 
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             """Call the original function."""
             try:
                 return func(*args, **kwargs)
@@ -402,7 +367,7 @@ class prevent_exceptions:  # noqa: N801,N806 pylint: disable=invalid-name
         return wrapper
 
 
-def is_enum(obj):
+def is_enum(obj: Any) -> bool:
     """Check if a given object is an enum."""
     try:
         return issubclass(obj, enum.Enum)
@@ -410,7 +375,19 @@ def is_enum(obj):
         return False
 
 
-def get_repr(obj, constructor=False, **attrs):
+def pyenum_str(value: enum.Enum) -> str:
+    """Get a string representation of a Python enum value.
+
+    This will have the form of "EnumType.membername", which is the default string
+    representation for Python up to 3.10. Unfortunately, that changes with Python 3.10:
+    https://bugs.python.org/issue40066
+    """
+    if sys.version_info[:2] >= (3, 10):
+        return repr(value)
+    return str(value)
+
+
+def get_repr(obj: Any, constructor: bool = False, **attrs: Any) -> str:
     """Get a suitable __repr__ string for an object.
 
     Args:
@@ -422,8 +399,14 @@ def get_repr(obj, constructor=False, **attrs):
     cls = qualname(obj.__class__)
     parts = []
     items = sorted(attrs.items())
+
     for name, val in items:
-        parts.append('{}={!r}'.format(name, val))
+        if isinstance(val, enum.Enum):
+            s = pyenum_str(val)
+        else:
+            s = repr(val)
+        parts.append(f'{name}={s}')
+
     if constructor:
         return '{}({})'.format(cls, ', '.join(parts))
     else:
@@ -433,7 +416,7 @@ def get_repr(obj, constructor=False, **attrs):
             return '<{}>'.format(cls)
 
 
-def qualname(obj):
+def qualname(obj: Any) -> str:
     """Get the fully qualified name of an object.
 
     Based on twisted.python.reflect.fullyQualifiedName.
@@ -461,7 +444,10 @@ def qualname(obj):
         return repr(obj)
 
 
-def raises(exc, func, *args):
+_ExceptionType = Union[Type[BaseException], Tuple[Type[BaseException]]]
+
+
+def raises(exc: _ExceptionType, func: Callable, *args: Any) -> bool:
     """Check if a function raises a given exception.
 
     Args:
@@ -480,7 +466,7 @@ def raises(exc, func, *args):
         return False
 
 
-def force_encoding(text, encoding):
+def force_encoding(text: str, encoding: str) -> str:
     """Make sure a given text is encodable with the given encoding.
 
     This replaces all chars not encodable with question marks.
@@ -488,7 +474,9 @@ def force_encoding(text, encoding):
     return text.encode(encoding, errors='replace').decode(encoding)
 
 
-def sanitize_filename(name, replacement='_'):
+def sanitize_filename(name: str,
+                      replacement: Optional[str] = '_',
+                      shorten: bool = False) -> str:
     """Replace invalid filename characters.
 
     Note: This should be used for the basename, as it also removes the path
@@ -497,19 +485,66 @@ def sanitize_filename(name, replacement='_'):
     Args:
         name: The filename.
         replacement: The replacement character (or None).
+        shorten: Shorten the filename if it's too long for the filesystem.
     """
     if replacement is None:
         replacement = ''
-    # Bad characters taken from Windows, there are even fewer on Linux
+
+    # Remove chars which can't be encoded in the filename encoding.
+    # See https://github.com/qutebrowser/qutebrowser/issues/427
+    encoding = sys.getfilesystemencoding()
+    name = force_encoding(name, encoding)
+
     # See also
     # https://en.wikipedia.org/wiki/Filename#Reserved_characters_and_words
-    bad_chars = '\\/:*?"<>|'
+    if is_windows:
+        bad_chars = '\\/:*?"<>|'
+    elif is_mac:
+        # Colons can be confusing in finder https://superuser.com/a/326627
+        bad_chars = '/:'
+    else:
+        bad_chars = '/'
+
     for bad_char in bad_chars:
         name = name.replace(bad_char, replacement)
+
+    if not shorten:
+        return name
+
+    # Truncate the filename if it's too long.
+    # Most filesystems have a maximum filename length of 255 bytes:
+    # https://en.wikipedia.org/wiki/Comparison_of_file_systems#Limits
+    # We also want to keep some space for QtWebEngine's ".download" suffix, as
+    # well as deduplication counters.
+    max_bytes = 255 - len("(123).download")
+    root, ext = os.path.splitext(name)
+    root = root[:max_bytes - len(ext)]
+    excess = len(os.fsencode(root + ext)) - max_bytes
+
+    while excess > 0 and root:
+        # Max 4 bytes per character is assumed.
+        # Integer division floors to -∞, not to 0.
+        root = root[:(-excess // 4)]
+        excess = len(os.fsencode(root + ext)) - max_bytes
+
+    if not root:
+        # Trimming the root is not enough. We must trim the extension.
+        # We leave one character in the root, so that the filename
+        # doesn't start with a dot, which makes the file hidden.
+        root = name[0]
+        excess = len(os.fsencode(root + ext)) - max_bytes
+        while excess > 0 and ext:
+            ext = ext[:(-excess // 4)]
+            excess = len(os.fsencode(root + ext)) - max_bytes
+
+        assert ext, name
+
+    name = root + ext
+
     return name
 
 
-def set_clipboard(data, selection=False):
+def set_clipboard(data: str, selection: bool = False) -> None:
     """Set the clipboard to some given data."""
     global fake_clipboard
     if selection and not supports_selection():
@@ -523,7 +558,7 @@ def set_clipboard(data, selection=False):
         QApplication.clipboard().setText(data, mode=mode)
 
 
-def get_clipboard(selection=False, fallback=False):
+def get_clipboard(selection: bool = False, fallback: bool = False) -> str:
     """Get data from the clipboard.
 
     Args:
@@ -556,21 +591,12 @@ def get_clipboard(selection=False, fallback=False):
     return data
 
 
-def supports_selection():
+def supports_selection() -> bool:
     """Check if the OS supports primary selection."""
     return QApplication.clipboard().supportsSelection()
 
 
-def random_port():
-    """Get a random free port."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(('localhost', 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
-
-
-def open_file(filename, cmdline=None):
+def open_file(filename: str, cmdline: str = None) -> None:
     """Open the given file.
 
     If cmdline is not given, downloads.open_dispatcher is used.
@@ -589,10 +615,20 @@ def open_file(filename, cmdline=None):
     #   cmdutils -> command -> message -> usertypes
     from qutebrowser.config import config
     from qutebrowser.misc import guiprocess
+    from qutebrowser.utils import version, message
 
     # the default program to open downloads with - will be empty string
     # if we want to use the default
     override = config.val.downloads.open_dispatcher
+
+    if version.is_flatpak():
+        if cmdline:
+            message.error("Cannot spawn download dispatcher from sandbox")
+            return
+        if override:
+            message.warning("Ignoring download dispatcher from config in "
+                            "sandbox environment")
+            override = None
 
     # precedence order: cmdline > downloads.open_dispatcher > openUrl
 
@@ -606,6 +642,8 @@ def open_file(filename, cmdline=None):
     if cmdline is None and override:
         cmdline = override
 
+    assert cmdline is not None
+
     cmd, *args = shlex.split(cmdline)
     args = [arg.replace('{}', filename) for arg in args]
     if '{}' not in cmdline:
@@ -616,12 +654,11 @@ def open_file(filename, cmdline=None):
     proc.start_detached(cmd, args)
 
 
-def unused(_arg):
+def unused(_arg: Any) -> None:
     """Function which does nothing to avoid pylint complaining."""
-    pass
 
 
-def expand_windows_drive(path):
+def expand_windows_drive(path: str) -> str:
     r"""Expand a drive-path like E: into E:\.
 
     Does nothing for other paths.
@@ -639,10 +676,23 @@ def expand_windows_drive(path):
         return path
 
 
-def yaml_load(f):
+def yaml_load(f: Union[str, IO[str]]) -> Any:
     """Wrapper over yaml.load using the C loader if possible."""
     start = datetime.datetime.now()
-    data = yaml.load(f, Loader=YamlLoader)
+
+    # WORKAROUND for https://github.com/yaml/pyyaml/pull/181
+    with log.py_warning_filter(
+            category=DeprecationWarning,
+            message=r"Using or importing the ABCs from 'collections' instead "
+            r"of from 'collections\.abc' is deprecated.*"):
+        try:
+            data = yaml.load(f, Loader=YamlLoader)
+        except ValueError as e:
+            if str(e).startswith('could not convert string to float'):
+                # WORKAROUND for https://github.com/yaml/pyyaml/issues/168
+                raise yaml.YAMLError(e)
+            raise  # pragma: no cover
+
     end = datetime.datetime.now()
 
     delta = (end - start).total_seconds()
@@ -662,7 +712,7 @@ def yaml_load(f):
     return data
 
 
-def yaml_dump(data, f=None):
+def yaml_dump(data: Any, f: IO[str] = None) -> Optional[str]:
     """Wrapper over yaml.dump using the C dumper if possible.
 
     Also returns a str instead of bytes.
@@ -675,7 +725,7 @@ def yaml_dump(data, f=None):
         return yaml_data.decode('utf-8')
 
 
-def chunk(elems, n):
+def chunk(elems: Sequence, n: int) -> Iterator[Sequence]:
     """Yield successive n-sized chunks from elems.
 
     If elems % n != 0, the last chunk will be smaller.
@@ -686,7 +736,7 @@ def chunk(elems, n):
         yield elems[i:i + n]
 
 
-def guess_mimetype(filename, fallback=False):
+def guess_mimetype(filename: str, fallback: bool = False) -> str:
     """Guess a mimetype based on a filename.
 
     Args:
@@ -700,3 +750,124 @@ def guess_mimetype(filename, fallback=False):
         else:
             raise ValueError("Got None mimetype for {}".format(filename))
     return mimetype
+
+
+def ceil_log(number: int, base: int) -> int:
+    """Compute max(1, ceil(log(number, base))).
+
+    Use only integer arithmetic in order to avoid numerical error.
+    """
+    if number < 1 or base < 2:
+        raise ValueError("math domain error")
+    result = 1
+    accum = base
+    while accum < number:
+        result += 1
+        accum *= base
+    return result
+
+
+def parse_duration(duration: str) -> int:
+    """Parse duration in format XhYmZs into milliseconds duration."""
+    if duration.isdigit():
+        # For backward compatibility return milliseconds
+        return int(duration)
+
+    match = re.fullmatch(
+        r'(?P<hours>[0-9]+(\.[0-9])?h)?\s*'
+        r'(?P<minutes>[0-9]+(\.[0-9])?m)?\s*'
+        r'(?P<seconds>[0-9]+(\.[0-9])?s)?',
+        duration
+    )
+    if not match or not match.group(0):
+        raise ValueError(
+            f"Invalid duration: {duration} - "
+            "expected XhYmZs or a number of milliseconds"
+        )
+    seconds_string = match.group('seconds') if match.group('seconds') else '0'
+    seconds = float(seconds_string.rstrip('s'))
+    minutes_string = match.group('minutes') if match.group('minutes') else '0'
+    minutes = float(minutes_string.rstrip('m'))
+    hours_string = match.group('hours') if match.group('hours') else '0'
+    hours = float(hours_string.rstrip('h'))
+    milliseconds = int((seconds + minutes * 60 + hours * 3600) * 1000)
+    return milliseconds
+
+
+def mimetype_extension(mimetype: str) -> Optional[str]:
+    """Get a suitable extension for a given mimetype.
+
+    This mostly delegates to Python's mimetypes.guess_extension(), but backports some
+    changes (via a simple override dict) which are missing from earlier Python versions.
+    Most likely, this can be dropped once the minimum Python version is raised to 3.7.
+    """
+    overrides = {
+        # Added around 3.8
+        "application/manifest+json": ".webmanifest",
+        "application/x-hdf5": ".h5",
+
+        # Added in Python 3.7
+        "application/wasm": ".wasm",
+
+        # Wrong values for Python 3.6
+        # https://bugs.python.org/issue1043134
+        # https://github.com/python/cpython/pull/14375
+        "application/octet-stream": ".bin",  # not .a
+        "application/postscript": ".ps",  # not .ai
+        "application/vnd.ms-excel": ".xls",  # not .xlb
+        "application/vnd.ms-powerpoint": ".ppt",  # not .pot
+        "application/xml": ".xsl",  # not .rdf
+        "audio/mpeg": ".mp3",  # not .mp2
+        "image/jpeg": ".jpg",  # not .jpe
+        "image/tiff": ".tiff",  # not .tif
+        "text/html": ".html",  # not .htm
+        "text/plain": ".txt",  # not .bat
+        "video/mpeg": ".mpeg",  # not .m1v
+    }
+    if mimetype in overrides:
+        return overrides[mimetype]
+    return mimetypes.guess_extension(mimetype, strict=False)
+
+
+@contextlib.contextmanager
+def cleanup_file(filepath: str) -> Iterator[None]:
+    """Context that deletes a file upon exit or error.
+
+    Args:
+        filepath: The file path
+    """
+    try:
+        yield
+    finally:
+        try:
+            os.remove(filepath)
+        except OSError as e:
+            log.misc.error(f"Failed to delete tempfile {filepath} ({e})!")
+
+
+_RECT_PATTERN = re.compile(r'(?P<w>\d+)x(?P<h>\d+)\+(?P<x>\d+)\+(?P<y>\d+)')
+
+
+def parse_rect(s: str) -> QRect:
+    """Parse a rectangle string like 20x20+5+3.
+
+    Negative offsets aren't supported, and neither is leaving off parts of the string.
+    """
+    match = _RECT_PATTERN.match(s)
+    if not match:
+        raise ValueError(f"String {s} does not match WxH+X+Y")
+
+    w = int(match.group('w'))
+    h = int(match.group('h'))
+    x = int(match.group('x'))
+    y = int(match.group('y'))
+
+    try:
+        rect = QRect(x, y, w, h)
+    except OverflowError as e:
+        raise ValueError(e)
+
+    if not rect.isValid():
+        raise ValueError("Invalid rectangle")
+
+    return rect

@@ -1,5 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
+# Copyright 2017-2021 Florian Bruhin (The-Compiler) <me@the-compiler.org>
 # Copyright 2017-2018 Michal Siedlaczek <michal.siedlaczek@gmail.com>
 
 # This file is part of qutebrowser.
@@ -15,10 +16,11 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 
-import py.path  # pylint: disable=no-name-in-module
+import pathlib
+
 import pytest
 
 from qutebrowser.browser.webengine import spell
@@ -28,23 +30,23 @@ from scripts import dictcli
 
 def afrikaans():
     return dictcli.Language(
-        'af-ZA',
-        'Afrikaans (South Africa)',
-        'af-ZA-3-0')
+        code='af-ZA',
+        name='Afrikaans (South Africa)',
+        remote_filename='af-ZA-3-0.bdic')
 
 
 def english():
     return dictcli.Language(
-        'en-US',
-        'English (United States)',
-        'en-US-7-1')
+        code='en-US',
+        name='English (United States)',
+        remote_filename='en-US-7-1.bdic')
 
 
 def polish():
     return dictcli.Language(
-        'pl-PL',
-        'Polish (Poland)',
-        'pl-PL-3-0')
+        code='pl-PL',
+        name='Polish (Poland)',
+        remote_filename='pl-PL-3-0.bdic')
 
 
 def langs():
@@ -53,22 +55,25 @@ def langs():
 
 @pytest.fixture(autouse=True)
 def configdata_init():
-    """Initialize configdata if needed."""
     if configdata.DATA is None:
         configdata.init()
 
 
-def test_language(tmpdir, monkeypatch):
-    monkeypatch.setattr(spell, 'dictionary_dir', lambda: str(tmpdir))
-    (tmpdir / 'pl-PL-2-0.bdic').ensure()
+@pytest.fixture(autouse=True)
+def dict_tmp_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(spell, 'dictionary_dir', lambda: str(tmp_path))
+    return tmp_path
+
+
+def test_language(dict_tmp_path):
+    (dict_tmp_path / 'pl-PL-2-0.bdic').touch()
     assert english().local_filename is None
-    assert english().local_path is None
     assert polish()
 
 
 def test_parse_entry():
-    assert dictcli.parse_entry({'name': 'en-US-7-1.bdic'}) == \
-        ('en-US', 'en-US-7-1')
+    assert (dictcli.parse_entry({'name': 'en-US-7-1.bdic'}) ==
+            ('en-US', 'en-US-7-1.bdic'))
 
 
 def test_latest_yet():
@@ -78,23 +83,29 @@ def test_latest_yet():
     assert dictcli.latest_yet(code2file, 'en-US', 'en-US-8-0.bdic')
 
 
-def test_available_languages(tmpdir, monkeypatch):
-    monkeypatch.setattr(spell, 'dictionary_dir', lambda: str(tmpdir))
-    for f in ['pl-PL-2-0.bdic', english().remote_path]:
-        (tmpdir / f).ensure()
+def test_available_languages(dict_tmp_path, monkeypatch):
+    for f in ['pl-PL-2-0.bdic', english().remote_filename]:
+        (dict_tmp_path / f).touch()
     monkeypatch.setattr(dictcli, 'language_list_from_api', lambda: [
         (lang.code, lang.remote_filename) for lang in langs()
     ])
-    assert sorted(dictcli.available_languages()) == [
+    languages = sorted(dictcli.available_languages(), key=lambda lang: lang.code)
+    assert languages == [
         dictcli.Language(
-            'af-ZA', 'Afrikaans (South Africa)',
-            'af-ZA-3-0', None),
+            code='af-ZA',
+            name='Afrikaans (South Africa)',
+            remote_filename='af-ZA-3-0.bdic',
+            local_filename=None),
         dictcli.Language(
-            'en-US', 'English (United States)',
-            'en-US-7-1', 'en-US-7-1'),
+            code='en-US',
+            name='English (United States)',
+            remote_filename='en-US-7-1.bdic',
+            local_filename=None),
         dictcli.Language(
-            'pl-PL', 'Polish (Poland)',
-            'pl-PL-3-0', 'pl-PL-2-0')
+            code='pl-PL',
+            name='Polish (Poland)',
+            remote_filename='pl-PL-3-0.bdic',
+            local_filename='pl-PL-2-0.bdic'),
     ]
 
 
@@ -109,29 +120,27 @@ def test_filter_languages():
         dictcli.filter_languages(langs(), ['pl-PL', 'en-GB'])
 
 
-def test_install(tmpdir, monkeypatch):
+def test_install(dict_tmp_path, monkeypatch):
     # given
-    monkeypatch.setattr(spell, 'dictionary_dir', lambda: str(tmpdir))
     monkeypatch.setattr(
         dictcli, 'download_dictionary',
-        lambda _url, dest: py.path.local(dest).ensure())  # pylint: disable=no-member
+        lambda _url, dest: pathlib.Path(dest).touch())
 
     # when
     dictcli.install(langs())
 
     # then
-    installed_files = [f.basename for f in tmpdir.listdir()]
-    expected_files = [lang.remote_path for lang in langs()]
+    installed_files = [f.name for f in dict_tmp_path.glob('*')]
+    expected_files = [lang.remote_filename for lang in langs()]
     assert sorted(installed_files) == sorted(expected_files)
 
 
-def test_update(tmpdir, monkeypatch):
+def test_update(dict_tmp_path, monkeypatch):
     # given
-    monkeypatch.setattr(spell, 'dictionary_dir', lambda: str(tmpdir))
     monkeypatch.setattr(
         dictcli, 'download_dictionary',
-        lambda _url, dest: py.path.local(dest).ensure())  # pylint: disable=no-member
-    (tmpdir / 'pl-PL-2-0.bdic').ensure()
+        lambda _url, dest: pathlib.Path(dest).touch())
+    (dict_tmp_path / 'pl-PL-2-0.bdic').touch()
     assert polish().local_version < polish().remote_version
 
     # when
@@ -141,19 +150,20 @@ def test_update(tmpdir, monkeypatch):
     assert polish().local_version == polish().remote_version
 
 
-def test_remove_old(tmpdir, monkeypatch):
+def test_remove_old(dict_tmp_path, monkeypatch):
     # given
-    monkeypatch.setattr(spell, 'dictionary_dir', lambda: str(tmpdir))
     monkeypatch.setattr(
         dictcli, 'download_dictionary',
-        lambda _url, dest: py.path.local(dest).ensure())  # pylint: disable=no-member
-    for f in ['pl-PL-2-0.bdic', polish().remote_path, english().remote_path]:
-        (tmpdir / f).ensure()
+        lambda _url, dest: pathlib.Path(dest).touch())
+    for f in ['pl-PL-2-0.bdic',
+              polish().remote_filename,
+              english().remote_filename]:
+        (dict_tmp_path / f).touch()
 
     # when
     dictcli.remove_old(langs())
 
     # then
-    installed_files = [f.basename for f in tmpdir.listdir()]
-    expected_files = [polish().remote_path, english().remote_path]
+    installed_files = [f.name for f in dict_tmp_path.glob('*')]
+    expected_files = [polish().remote_filename, english().remote_filename]
     assert sorted(installed_files) == sorted(expected_files)

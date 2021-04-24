@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2015-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2015-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,25 +15,25 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Simple history which gets written to disk."""
 
 import os
 import time
 import contextlib
+from typing import cast, Mapping, MutableSequence
 
 from PyQt5.QtCore import pyqtSlot, QUrl, pyqtSignal
 from PyQt5.QtWidgets import QProgressDialog, QApplication
 
 from qutebrowser.config import config
-from qutebrowser.commands import cmdutils, cmdexc
-from qutebrowser.utils import utils, objreg, log, usertypes, message, qtutils
+from qutebrowser.api import cmdutils
+from qutebrowser.utils import utils, log, usertypes, message, qtutils
 from qutebrowser.misc import objects, sql
 
 
-# increment to indicate that HistoryCompletion must be regenerated
-_USER_VERSION = 2
+web_history = cast('WebHistory', None)
 
 
 class HistoryProgress:
@@ -49,14 +49,21 @@ class HistoryProgress:
         self._progress = None
         self._value = 0
 
-    def start(self, text, maximum):
+    def start(self, text):
         """Start showing a progress dialog."""
         self._progress = QProgressDialog()
-        self._progress.setMinimumDuration(500)
+        self._progress.setMaximum(0)  # unknown
+        self._progress.setMinimumDuration(0)
         self._progress.setLabelText(text)
-        self._progress.setMaximum(maximum)
         self._progress.setCancelButton(None)
+        self._progress.setAutoClose(False)
         self._progress.show()
+        QApplication.processEvents()
+
+    def set_maximum(self, maximum):
+        """Set the progress maximum as soon as we know about it."""
+        assert self._progress is not None
+        self._progress.setMaximum(maximum)
         QApplication.processEvents()
 
     def tick(self):
@@ -67,7 +74,10 @@ class HistoryProgress:
             QApplication.processEvents()
 
     def finish(self):
-        """Finish showing the progress dialog."""
+        """Finish showing the progress dialog.
+
+        After this is called, the object can be reused.
+        """
         if self._progress is not None:
             self._progress.hide()
 
@@ -77,19 +87,36 @@ class CompletionMetaInfo(sql.SqlTable):
     """Table containing meta-information for the completion."""
 
     KEYS = {
+        'excluded_patterns': '',
         'force_rebuild': False,
     }
 
     def __init__(self, parent=None):
-        super().__init__("CompletionMetaInfo", ['key', 'value'],
-                         constraints={'key': 'PRIMARY KEY'})
-        for key, default in self.KEYS.items():
-            if key not in self:
-                self[key] = default
+        self._fields = ['key', 'value']
+        self._constraints = {'key': 'PRIMARY KEY'}
+        super().__init__(
+            "CompletionMetaInfo", self._fields, constraints=self._constraints)
+
+        if sql.user_version_changed():
+            self._init_default_values()
 
     def _check_key(self, key):
         if key not in self.KEYS:
             raise KeyError(key)
+
+    def try_recover(self):
+        """Try recovering the table structure.
+
+        This should be called if getting a value via __getattr__ failed. In theory, this
+        should never happen, in practice, it does.
+        """
+        self._create_table(self._fields, constraints=self._constraints, force=True)
+        self._init_default_values()
+
+    def _init_default_values(self):
+        for key, default in self.KEYS.items():
+            if key not in self:
+                self[key] = default
 
     def __contains__(self, key):
         self._check_key(key)
@@ -128,17 +155,12 @@ class WebHistory(sql.SqlTable):
         completion: A CompletionHistory instance.
         metainfo: A CompletionMetaInfo instance.
         _progress: A HistoryProgress instance.
-
-    Class attributes:
-        _PROGRESS_THRESHOLD: When to start showing progress dialogs.
     """
 
     # All web history cleared
     history_cleared = pyqtSignal()
     # one url cleared
     url_cleared = pyqtSignal(QUrl)
-
-    _PROGRESS_THRESHOLD = 1000
 
     def __init__(self, progress, parent=None):
         super().__init__("History", ['url', 'title', 'atime', 'redirect'],
@@ -148,18 +170,42 @@ class WebHistory(sql.SqlTable):
                                       'redirect': 'NOT NULL'},
                          parent=parent)
         self._progress = progress
+        # Store the last saved url to avoid duplicate immediate saves.
+        self._last_url = None
 
         self.completion = CompletionHistory(parent=self)
         self.metainfo = CompletionMetaInfo(parent=self)
 
-        if sql.Query('pragma user_version').run().value() < _USER_VERSION:
-            self.completion.delete_all()
-        if self.metainfo['force_rebuild']:
-            self.completion.delete_all()
-            self.metainfo['force_rebuild'] = False
+        try:
+            rebuild_completion = self.metainfo['force_rebuild']
+        except sql.BugError:  # pragma: no cover
+            log.sql.warning("Failed to access meta info, trying to recover...",
+                            exc_info=True)
+            self.metainfo.try_recover()
+            rebuild_completion = self.metainfo['force_rebuild']
 
-        if not self.completion:
-            # either the table is out-of-date or the user wiped it manually
+        if sql.user_version_changed():
+            # If the DB user version changed, run a full cleanup and rebuild the
+            # completion history.
+            #
+            # In the future, this could be improved to only be done when actually needed
+            # - but version changes happen very infrequently, rebuilding everything
+            # gives us less corner-cases to deal with, and we can run a VACUUM to make
+            # things smaller.
+            self._cleanup_history()
+            rebuild_completion = True
+
+        # Get a string of all patterns
+        patterns = config.instance.get_str('completion.web_history.exclude')
+
+        # If patterns changed, update them in database and rebuild completion
+        if self.metainfo['excluded_patterns'] != patterns:
+            self.metainfo['excluded_patterns'] = patterns
+            rebuild_completion = True
+
+        if rebuild_completion and self:
+            # If no history exists, we don't need to spawn a dialog for
+            # cleaning it up.
             self._rebuild_completion()
 
         self.create_index('HistoryIndex', 'url')
@@ -179,55 +225,108 @@ class WebHistory(sql.SqlTable):
                                        'ORDER BY atime desc '
                                        'limit :limit offset :offset')
 
-        config.instance.changed.connect(self._on_config_changed)
-
     def __repr__(self):
         return utils.get_repr(self, length=len(self))
 
     def __contains__(self, url):
         return self._contains_query.run(val=url).value()
 
-    @config.change_filter('completion.web_history.exclude')
-    def _on_config_changed(self):
-        self.metainfo['force_rebuild'] = True
-
     @contextlib.contextmanager
     def _handle_sql_errors(self):
         try:
             yield
-        except sql.SqlEnvironmentError as e:
-            message.error("Failed to write history: {}".format(e.text()))
+        except sql.KnownError as e:
+            message.error(f"Failed to write history: {e.text()}")
 
-    def _is_excluded(self, url):
+    def _is_excluded_from_completion(self, url):
         """Check if the given URL is excluded from the completion."""
         patterns = config.cache['completion.web_history.exclude']
         return any(pattern.matches(url) for pattern in patterns)
 
-    def _rebuild_completion(self):
-        data = {'url': [], 'title': [], 'last_atime': []}
-        # select the latest entry for each url
-        q = sql.Query('SELECT url, title, max(atime) AS atime FROM History '
-                      'WHERE NOT redirect and url NOT LIKE "qute://back%" '
-                      'GROUP BY url ORDER BY atime asc')
-        entries = list(q.run())
+    def _is_excluded_entirely(self, url):
+        """Check if the given URL is excluded from the entire history.
 
-        if len(entries) > self._PROGRESS_THRESHOLD:
-            self._progress.start("Rebuilding completion...", len(entries))
+        This is the case for URLs which can't be visited at a later point; or which are
+        usually excessively long.
+
+        NOTE: If you add new filters here, it might be a good idea to adjust the
+        _USER_VERSION code and _cleanup_history so that older histories get cleaned up
+        accordingly as well.
+        """
+        return (
+            url.scheme() in {'data', 'view-source'} or
+            (url.scheme() == 'qute' and url.host() in {'back', 'pdfjs'})
+        )
+
+    def _cleanup_history(self):
+        """Do a one-time cleanup of the entire history.
+
+        This is run only once after the v2.0.0 upgrade, based on the database's
+        user_version.
+        """
+        terms = [
+            'data:%',
+            'view-source:%',
+            'qute://back%',
+            'qute://pdfjs%',
+        ]
+        where_clause = ' OR '.join(f"url LIKE '{term}'" for term in terms)
+        q = sql.Query(f'DELETE FROM History WHERE {where_clause}')
+        entries = q.run()
+        log.sql.debug(f"Cleanup removed {entries.rows_affected()} items")
+
+    def _rebuild_completion(self):
+        # If this process was interrupted, make sure we trigger a rebuild again
+        # at the next start.
+        self.metainfo['force_rebuild'] = True
+
+        data: Mapping[str, MutableSequence[str]] = {
+            'url': [],
+            'title': [],
+            'last_atime': []
+        }
+
+        self._progress.start(
+            "<b>Rebuilding completion...</b><br>"
+            "This is a one-time operation and happens because the database version "
+            "or <i>completion.web_history.exclude</i> was changed."
+        )
+
+        # Delete old entries
+        self.completion.delete_all()
+        QApplication.processEvents()
+
+        # Select the latest entry for each url
+        q = sql.Query('SELECT url, title, max(atime) AS atime FROM History '
+                      'WHERE NOT redirect '
+                      'GROUP BY url ORDER BY atime asc')
+        result = q.run()
+        QApplication.processEvents()
+        entries = list(result)
+
+        self._progress.set_maximum(len(entries))
 
         for entry in entries:
             self._progress.tick()
 
             url = QUrl(entry.url)
-            if self._is_excluded(url):
+            if self._is_excluded_from_completion(url):
                 continue
             data['url'].append(self._format_completion_url(url))
             data['title'].append(entry.title)
             data['last_atime'].append(entry.atime)
 
-        self._progress.finish()
+        self._progress.set_maximum(0)
+
+        # We might have caused fragmentation - let's clean up.
+        sql.Query('VACUUM').run()
+        QApplication.processEvents()
 
         self.completion.insert_batch(data, replace=True)
-        sql.Query('pragma user_version = {}'.format(_USER_VERSION)).run()
+        QApplication.processEvents()
+
+        self._progress.finish()
+        self.metainfo['force_rebuild'] = False
 
     def get_recent(self):
         """Get the most recent history entries."""
@@ -254,28 +353,13 @@ class WebHistory(sql.SqlTable):
         self._before_query.run(latest=latest, limit=limit, offset=offset)
         return iter(self._before_query)
 
-    @cmdutils.register(name='history-clear', instance='web-history')
-    def clear(self, force=False):
-        """Clear all browsing history.
-
-        Note this only clears the global history
-        (e.g. `~/.local/share/qutebrowser/history` on Linux) but not cookies,
-        the back/forward history of a tab, cache or other persistent data.
-
-        Args:
-            force: Don't ask for confirmation.
-        """
-        if force:
-            self._do_clear()
-        else:
-            message.confirm_async(yes_action=self._do_clear,
-                                  title="Clear all browsing history?")
-
-    def _do_clear(self):
+    def clear(self):
+        """Clear all browsing history."""
         with self._handle_sql_errors():
             self.delete_all()
             self.completion.delete_all()
         self.history_cleared.emit()
+        self._last_url = None
 
     def delete_url(self, url):
         """Remove all history entries with the given url.
@@ -287,14 +371,14 @@ class WebHistory(sql.SqlTable):
         qtutils.ensure_valid(qurl)
         self.delete('url', self._format_url(qurl))
         self.completion.delete('url', self._format_completion_url(qurl))
+        if self._last_url == url:
+            self._last_url = None
         self.url_cleared.emit(qurl)
 
     @pyqtSlot(QUrl, QUrl, str)
     def add_from_tab(self, url, requested_url, title):
         """Add a new history entry as slot, called from a BrowserTab."""
-        if any(url.scheme() in ('data', 'view-source') or
-               (url.scheme(), url.host()) == ('qute', 'back')
-               for url in (url, requested_url)):
+        if self._is_excluded_entirely(url) or self._is_excluded_entirely(requested_url):
             return
         if url.isEmpty():
             # things set via setHtml
@@ -306,7 +390,9 @@ class WebHistory(sql.SqlTable):
             # If the url of the page is different than the url of the link
             # originally clicked, save them both.
             self.add_url(requested_url, title, redirect=True)
-        self.add_url(url, title)
+        if url != self._last_url:
+            self.add_url(url, title)
+            self._last_url = url
 
     def add_url(self, url, title="", *, redirect=False, atime=None):
         """Called via add_from_tab when a URL should be added to the history.
@@ -321,7 +407,7 @@ class WebHistory(sql.SqlTable):
             log.misc.warning("Ignoring invalid URL being added to history")
             return
 
-        if 'no-sql-history' in objreg.get('args').debug_flags:
+        if 'no-sql-history' in objects.debug_flags:
             return
 
         atime = int(atime) if (atime is not None) else int(time.time())
@@ -332,7 +418,7 @@ class WebHistory(sql.SqlTable):
                          'atime': atime,
                          'redirect': redirect})
 
-            if redirect or self._is_excluded(url):
+            if redirect or self._is_excluded_from_completion(url):
                 return
 
             self.completion.insert({
@@ -347,25 +433,43 @@ class WebHistory(sql.SqlTable):
     def _format_completion_url(self, url):
         return url.toString(QUrl.RemovePassword)
 
-    @cmdutils.register(instance='web-history', debug=True)
-    def debug_dump_history(self, dest):
-        """Dump the history to a file in the old pre-SQL format.
 
-        Args:
-            dest: Where to write the file to.
-        """
-        dest = os.path.expanduser(dest)
+@cmdutils.register()
+def history_clear(force=False):
+    """Clear all browsing history.
 
-        lines = ('{}{} {} {}'
-                 .format(int(x.atime), '-r' * x.redirect, x.url, x.title)
-                 for x in self.select(sort_by='atime', sort_order='asc'))
+    Note this only clears the global history
+    (e.g. `~/.local/share/qutebrowser/history` on Linux) but not cookies,
+    the back/forward history of a tab, cache or other persistent data.
 
-        try:
-            with open(dest, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(lines))
-            message.info("Dumped history to {}".format(dest))
-        except OSError as e:
-            raise cmdexc.CommandError('Could not write history: {}'.format(e))
+    Args:
+        force: Don't ask for confirmation.
+    """
+    if force:
+        web_history.clear()
+    else:
+        message.confirm_async(yes_action=web_history.clear,
+                              title="Clear all browsing history?")
+
+
+@cmdutils.register(debug=True)
+def debug_dump_history(dest):
+    """Dump the history to a file in the old pre-SQL format.
+
+    Args:
+        dest: Where to write the file to.
+    """
+    dest = os.path.expanduser(dest)
+
+    lines = (f'{int(x.atime)}{"-r" * x.redirect} {x.url} {x.title}'
+             for x in web_history.select(sort_by='atime', sort_order='asc'))
+
+    try:
+        with open(dest, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+        message.info(f"Dumped history to {dest}")
+    except OSError as e:
+        raise cmdutils.CommandError(f'Could not write history: {e}')
 
 
 def init(parent=None):
@@ -374,10 +478,12 @@ def init(parent=None):
     Args:
         parent: The parent to use for WebHistory.
     """
+    global web_history
     progress = HistoryProgress()
-    history = WebHistory(progress=progress, parent=parent)
-    objreg.register('web-history', history)
+    web_history = WebHistory(progress=progress, parent=parent)
 
     if objects.backend == usertypes.Backend.QtWebKit:  # pragma: no cover
         from qutebrowser.browser.webkit import webkithistory
-        webkithistory.init(history)
+        webkithistory.init(web_history)
+        return
+    assert objects.backend == usertypes.Backend.QtWebEngine, objects.backend

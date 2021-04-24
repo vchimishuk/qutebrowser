@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,9 +15,11 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Command history for the status bar."""
+
+from typing import MutableSequence
 
 from PyQt5.QtCore import pyqtSlot, pyqtSignal, QObject
 
@@ -29,14 +31,10 @@ class HistoryEmptyError(Exception):
 
     """Raised when the history is empty."""
 
-    pass
-
 
 class HistoryEndReachedError(Exception):
 
     """Raised when the end of the history is reached."""
-
-    pass
 
 
 class History(QObject):
@@ -62,7 +60,7 @@ class History(QObject):
         super().__init__(parent)
         self._tmphist = None
         if history is None:
-            self.history = []
+            self.history: MutableSequence[str] = []
         else:
             self.history = history
 
@@ -84,7 +82,9 @@ class History(QObject):
         """
         log.misc.debug("Preset text: '{}'".format(text))
         if text:
-            items = [e for e in self.history if e.startswith(text)]
+            items: MutableSequence[str] = [
+                e for e in self.history
+                if e.startswith(text)]
         else:
             items = self.history
         if not items:
@@ -104,6 +104,8 @@ class History(QObject):
         """
         if not self.is_browsing():
             raise ValueError("Currently not browsing history")
+        assert self._tmphist is not None
+
         try:
             return self._tmphist.previtem()
         except IndexError:
@@ -116,6 +118,8 @@ class History(QObject):
         """
         if not self.is_browsing():
             raise ValueError("Currently not browsing history")
+        assert self._tmphist is not None
+
         try:
             return self._tmphist.nextitem()
         except IndexError:

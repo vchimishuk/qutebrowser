@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Configuration data for config.py.
 
@@ -24,17 +24,22 @@ Module attributes:
 DATA: A dict of Option objects after init() has been called.
 """
 
+from typing import (Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
+                    Sequence, Tuple, Union, cast)
 import functools
+import dataclasses
 
-import attr
 from qutebrowser.config import configtypes
-from qutebrowser.utils import usertypes, qtutils, utils
+from qutebrowser.utils import usertypes, qtutils, utils, resources
+from qutebrowser.misc import debugcachestats
 
-DATA = None
-MIGRATIONS = None
+DATA = cast(Mapping[str, 'Option'], None)
+MIGRATIONS = cast('Migrations', None)
+
+_BackendDict = Mapping[str, Union[str, bool]]
 
 
-@attr.s
+@dataclasses.dataclass(order=True)
 class Option:
 
     """Description of an Option in the config.
@@ -42,18 +47,18 @@ class Option:
     Note that this is just an option which exists, with no value associated.
     """
 
-    name = attr.ib()
-    typ = attr.ib()
-    default = attr.ib()
-    backends = attr.ib()
-    raw_backends = attr.ib()
-    description = attr.ib()
-    supports_pattern = attr.ib(default=False)
-    restart = attr.ib(default=False)
-    no_autoconfig = attr.ib(default=False)
+    name: str
+    typ: configtypes.BaseType
+    default: Any
+    backends: Iterable[usertypes.Backend]
+    raw_backends: Optional[Mapping[str, bool]]
+    description: str
+    supports_pattern: bool = False
+    restart: bool = False
+    no_autoconfig: bool = False
 
 
-@attr.s
+@dataclasses.dataclass
 class Migrations:
 
     """Migrated options in configdata.yml.
@@ -63,11 +68,11 @@ class Migrations:
         deleted: A list of option names which have been removed.
     """
 
-    renamed = attr.ib(default=attr.Factory(dict))
-    deleted = attr.ib(default=attr.Factory(list))
+    renamed: Dict[str, str] = dataclasses.field(default_factory=dict)
+    deleted: List[str] = dataclasses.field(default_factory=list)
 
 
-def _raise_invalid_node(name, what, node):
+def _raise_invalid_node(name: str, what: str, node: Any) -> None:
     """Raise an exception for an invalid configdata YAML node.
 
     Args:
@@ -79,18 +84,21 @@ def _raise_invalid_node(name, what, node):
         name, what, node))
 
 
-def _parse_yaml_type(name, node):
+def _parse_yaml_type(
+        name: str,
+        node: Union[str, Mapping[str, Any]],
+) -> configtypes.BaseType:
     if isinstance(node, str):
         # e.g:
-        #  type: Bool
+        #   > type: Bool
         # -> create the type object without any arguments
         type_name = node
-        kwargs = {}
+        kwargs: MutableMapping[str, Any] = {}
     elif isinstance(node, dict):
         # e.g:
-        #  type:
-        #    name: String
-        #    none_ok: true
+        #   > type:
+        #   >   name: String
+        #   >   none_ok: true
         # -> create the type object and pass arguments
         type_name = node.pop('name')
         kwargs = node
@@ -123,14 +131,17 @@ def _parse_yaml_type(name, node):
             type_name, node, e))
 
 
-def _parse_yaml_backends_dict(name, node):
+def _parse_yaml_backends_dict(
+        name: str,
+        node: _BackendDict,
+) -> Sequence[usertypes.Backend]:
     """Parse a dict definition for backends.
 
     Example:
 
     backends:
       QtWebKit: true
-      QtWebEngine: Qt 5.9
+      QtWebEngine: Qt 5.15
     """
     str_to_backend = {
         'QtWebKit': usertypes.Backend.QtWebKit,
@@ -147,11 +158,9 @@ def _parse_yaml_backends_dict(name, node):
     conditionals = {
         True: True,
         False: False,
-        'Qt 5.8': qtutils.version_check('5.8'),
-        'Qt 5.9': qtutils.version_check('5.9'),
-        'Qt 5.9.2': qtutils.version_check('5.9.2'),
-        'Qt 5.10': qtutils.version_check('5.10'),
-        'Qt 5.11': qtutils.version_check('5.11'),
+        'Qt 5.13': qtutils.version_check('5.13'),
+        'Qt 5.14': qtutils.version_check('5.14'),
+        'Qt 5.15': qtutils.version_check('5.15'),
     }
     for key in sorted(node.keys()):
         if conditionals[node[key]]:
@@ -160,7 +169,10 @@ def _parse_yaml_backends_dict(name, node):
     return backends
 
 
-def _parse_yaml_backends(name, node):
+def _parse_yaml_backends(
+        name: str,
+        node: Union[None, str, _BackendDict],
+) -> Sequence[usertypes.Backend]:
     """Parse a backend node in the yaml.
 
     It can have one of those four forms:
@@ -169,7 +181,7 @@ def _parse_yaml_backends(name, node):
     - backend: QtWebEngine -> setting only available with QtWebEngine
     - backend:
        QtWebKit: true
-       QtWebEngine: Qt 5.9
+       QtWebEngine: Qt 5.15
       -> setting available based on the given conditionals.
 
     Return:
@@ -187,7 +199,9 @@ def _parse_yaml_backends(name, node):
     raise utils.Unreachable
 
 
-def _read_yaml(yaml_data):
+def _read_yaml(
+        yaml_data: str,
+) -> Tuple[Mapping[str, Option], Migrations]:
     """Read config data from a YAML file.
 
     Args:
@@ -248,13 +262,14 @@ def _read_yaml(yaml_data):
     return parsed, migrations
 
 
+@debugcachestats.register()
 @functools.lru_cache(maxsize=256)
-def is_valid_prefix(prefix):
+def is_valid_prefix(prefix: str) -> bool:
     """Check whether the given prefix is a valid prefix for some option."""
     return any(key.startswith(prefix + '.') for key in DATA)
 
 
-def init():
+def init() -> None:
     """Initialize configdata from the YAML file."""
     global DATA, MIGRATIONS
-    DATA, MIGRATIONS = _read_yaml(utils.read_file('config/configdata.yml'))
+    DATA, MIGRATIONS = _read_yaml(resources.read_file('config/configdata.yml'))

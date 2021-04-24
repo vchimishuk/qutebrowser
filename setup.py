@@ -2,7 +2,7 @@
 
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2017 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -17,7 +17,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """setuptools installer script for qutebrowser."""
 
@@ -71,10 +71,12 @@ try:
         entry_points={'gui_scripts':
                       ['qutebrowser = qutebrowser.qutebrowser:main']},
         zip_safe=True,
-        install_requires=['pypeg2', 'jinja2', 'pygments', 'PyYAML', 'attrs'],
-        python_requires='>=3.5',
+        install_requires=['jinja2', 'PyYAML',
+                          'dataclasses; python_version < "3.7"',
+                          'importlib_resources>=1.1.0; python_version < "3.9"'],
+        python_requires='>=3.6',
         name='qutebrowser',
-        version='.'.join(str(e) for e in _get_constant('version_info')),
+        version=_get_constant('version'),
         description=_get_constant('description'),
         long_description=read_file('README.asciidoc'),
         long_description_content_type='text/plain',
@@ -83,7 +85,7 @@ try:
         author_email=_get_constant('email'),
         license=_get_constant('license'),
         classifiers=[
-            'Development Status :: 4 - Beta',
+            'Development Status :: 5 - Production/Stable',
             'Environment :: X11 Applications :: Qt',
             'Intended Audience :: End Users/Desktop',
             'License :: OSI Approved :: GNU General Public License v3 or later '
@@ -94,9 +96,10 @@ try:
             'Operating System :: MacOS',
             'Operating System :: POSIX :: BSD',
             'Programming Language :: Python :: 3',
-            'Programming Language :: Python :: 3.5',
             'Programming Language :: Python :: 3.6',
             'Programming Language :: Python :: 3.7',
+            'Programming Language :: Python :: 3.8',
+            'Programming Language :: Python :: 3.9',
             'Topic :: Internet',
             'Topic :: Internet :: WWW/HTTP',
             'Topic :: Internet :: WWW/HTTP :: Browsers',

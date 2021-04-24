@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2017-2018 Ryan Roden-Corrent (rcorre) <ryan@rcorre.net>
+# Copyright 2017-2021 Ryan Roden-Corrent (rcorre) <ryan@rcorre.net>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Tests for CompletionModel."""
 
@@ -28,7 +28,7 @@ from PyQt5.QtCore import QModelIndex
 
 from qutebrowser.completion.models import completionmodel, listcategory
 from qutebrowser.utils import qtutils
-from qutebrowser.commands import cmdexc
+from qutebrowser.api import cmdutils
 
 
 @hypothesis.given(strategies.lists(
@@ -41,7 +41,7 @@ def test_first_last_item(counts):
         cat = mock.Mock(spec=['layoutChanged', 'layoutAboutToBeChanged'])
         cat.rowCount = mock.Mock(return_value=c, spec=[])
         model.add_category(cat)
-    data = [i for i, rowCount in enumerate(counts) if rowCount > 0]
+    data = [i for i, row_count in enumerate(counts) if row_count > 0]
     if not data:
         # with no items, first and last should be an invalid index
         assert not model.first_item().isValid()
@@ -77,7 +77,7 @@ def test_set_pattern(pat, qtbot):
     for c in cats:
         c.set_pattern = mock.Mock(spec=[])
         model.add_category(c)
-    with qtbot.waitSignals([model.layoutAboutToBeChanged, model.layoutChanged],
+    with qtbot.wait_signals([model.layoutAboutToBeChanged, model.layoutChanged],
                            order='strict'):
         model.set_pattern(pat)
     for c in cats:
@@ -102,7 +102,7 @@ def test_delete_cur_item_no_func():
     model.rowsRemoved.connect(callback)
     model.add_category(cat)
     parent = model.index(0, 0)
-    with pytest.raises(cmdexc.CommandError):
+    with pytest.raises(cmdutils.CommandError):
         model.delete_cur_item(model.index(0, 0, parent))
     callback.assert_not_called()
 

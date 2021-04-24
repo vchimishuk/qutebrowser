@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2017-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2017-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Load, parse and make available Greasemonkey scripts."""
 
@@ -26,39 +26,48 @@ import fnmatch
 import functools
 import glob
 import textwrap
+import dataclasses
+from typing import cast, List, Sequence
 
-import attr
 from PyQt5.QtCore import pyqtSignal, QObject, QUrl
 
 from qutebrowser.utils import (log, standarddir, jinja, objreg, utils,
                                javascript, urlmatch, version, usertypes)
-from qutebrowser.commands import cmdutils
+from qutebrowser.api import cmdutils
 from qutebrowser.browser import downloads
 from qutebrowser.misc import objects
 
 
-def _scripts_dir():
+gm_manager = cast('GreasemonkeyManager', None)
+
+
+def _scripts_dirs():
     """Get the directory of the scripts."""
-    return os.path.join(standarddir.data(), 'greasemonkey')
+    return [
+        os.path.join(standarddir.data(), 'greasemonkey'),
+        os.path.join(standarddir.config(), 'greasemonkey'),
+    ]
 
 
 class GreasemonkeyScript:
 
     """Container class for userscripts, parses metadata blocks."""
 
-    def __init__(self, properties, code):
+    def __init__(self, properties, code,  # noqa: C901 pragma: no mccabe
+                 filename=None):
         self._code = code
-        self.includes = []
-        self.matches = []
-        self.excludes = []
-        self.requires = []
+        self.includes: Sequence[str] = []
+        self.matches: Sequence[str] = []
+        self.excludes: Sequence[str] = []
+        self.requires: Sequence[str] = []
         self.description = None
-        self.name = None
         self.namespace = None
         self.run_at = None
         self.script_meta = None
         self.runs_on_sub_frames = True
         self.jsworld = "main"
+        self.name = ''
+
         for name, value in properties:
             if name == 'name':
                 self.name = value
@@ -81,11 +90,19 @@ class GreasemonkeyScript:
             elif name == 'qute-js-world':
                 self.jsworld = value
 
+        if not self.name:
+            if filename:
+                self.name = filename
+            else:
+                raise ValueError(
+                    "@name key required or pass filename to init."
+                )
+
     HEADER_REGEX = r'// ==UserScript==|\n+// ==/UserScript==\n'
     PROPS_REGEX = r'// @(?P<prop>[^\s]+)\s*(?P<val>.*)'
 
     @classmethod
-    def parse(cls, source):
+    def parse(cls, source, filename=None):
         """GreasemonkeyScript factory.
 
         Takes a userscript source and returns a GreasemonkeyScript.
@@ -97,11 +114,48 @@ class GreasemonkeyScript:
             _head, props, _code = matches
         except ValueError:
             props = ""
-        script = cls(re.findall(cls.PROPS_REGEX, props), source)
+        script = cls(
+            re.findall(cls.PROPS_REGEX, props),
+            source,
+            filename=filename
+        )
         script.script_meta = props
         if not script.includes and not script.matches:
             script.includes = ['*']
         return script
+
+    def needs_document_end_workaround(self):
+        """Check whether to force @run-at document-end.
+
+        This needs to be done on QtWebEngine (since Qt 5.12) for known-broken scripts.
+
+        On Qt 5.12, accessing the DOM isn't possible with "@run-at
+        document-start". It was documented to be impossible before, but seems
+        to work fine.
+
+        However, some scripts do DOM access with "@run-at document-start". Fix
+        those by forcing them to use document-end instead.
+        """
+        if objects.backend == usertypes.Backend.QtWebKit:
+            return False
+
+        assert objects.backend == usertypes.Backend.QtWebEngine, objects.backend
+
+        broken_scripts = [
+            ('http://userstyles.org', None),
+            ('https://github.com/ParticleCore', 'Iridium'),
+        ]
+        return any(self._matches_id(namespace=namespace, name=name)
+                   for namespace, name in broken_scripts)
+
+    def _matches_id(self, *, namespace, name):
+        """Check if this script matches the given namespace/name.
+
+        Both namespace and name can be None in order to match any script.
+        """
+        matches_namespace = namespace is None or self.namespace == namespace
+        matches_name = name is None or self.name == name
+        return matches_namespace and matches_name
 
     def code(self):
         """Return the processed JavaScript code of this script.
@@ -121,7 +175,7 @@ class GreasemonkeyScript:
             scriptName=javascript.string_escape(
                 "/".join([self.namespace or '', self.name])),
             scriptInfo=self._meta_json(),
-            scriptMeta=javascript.string_escape(self.script_meta),
+            scriptMeta=javascript.string_escape(self.script_meta or ''),
             scriptSource=self._code,
             use_proxy=use_proxy)
 
@@ -144,15 +198,15 @@ class GreasemonkeyScript:
         self._code = "\n".join([textwrap.indent(source, "    "), self._code])
 
 
-@attr.s
+@dataclasses.dataclass
 class MatchingScripts:
 
     """All userscripts registered to run on a particular url."""
 
-    url = attr.ib()
-    start = attr.ib(default=attr.Factory(list))
-    end = attr.ib(default=attr.Factory(list))
-    idle = attr.ib(default=attr.Factory(list))
+    url: QUrl
+    start: List[GreasemonkeyScript] = dataclasses.field(default_factory=list)
+    end: List[GreasemonkeyScript] = dataclasses.field(default_factory=list)
+    idle: List[GreasemonkeyScript] = dataclasses.field(default_factory=list)
 
 
 class GreasemonkeyMatcher:
@@ -205,16 +259,14 @@ class GreasemonkeyManager(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._run_start = []
-        self._run_end = []
-        self._run_idle = []
-        self._in_progress_dls = []
+        self._run_start: List[GreasemonkeyScript] = []
+        self._run_end: List[GreasemonkeyScript] = []
+        self._run_idle: List[GreasemonkeyScript] = []
+        self._in_progress_dls: List[downloads.AbstractDownloadItem] = []
 
         self.load_scripts()
 
-    @cmdutils.register(name='greasemonkey-reload',
-                       instance='greasemonkey')
-    def load_scripts(self, force=False):
+    def load_scripts(self, *, force=False):
         """Re-read Greasemonkey scripts from disk.
 
         The scripts are read from a 'greasemonkey' subdirectory in
@@ -228,24 +280,26 @@ class GreasemonkeyManager(QObject):
         self._run_end = []
         self._run_idle = []
 
-        scripts_dir = os.path.abspath(_scripts_dir())
-        log.greasemonkey.debug("Reading scripts from: {}".format(scripts_dir))
-        for script_filename in glob.glob(os.path.join(scripts_dir, '*.js')):
-            if not os.path.isfile(script_filename):
-                continue
-            script_path = os.path.join(scripts_dir, script_filename)
-            with open(script_path, encoding='utf-8-sig') as script_file:
-                script = GreasemonkeyScript.parse(script_file.read())
-                if not script.name:
-                    script.name = script_filename
-                self.add_script(script, force)
+        for scripts_dir in _scripts_dirs():
+            scripts_dir = os.path.abspath(scripts_dir)
+            log.greasemonkey.debug("Reading scripts from: {}".format(scripts_dir))
+            for script_filename in glob.glob(os.path.join(scripts_dir, '*.js')):
+                if not os.path.isfile(script_filename):
+                    continue
+                script_path = os.path.join(scripts_dir, script_filename)
+                with open(script_path, encoding='utf-8-sig') as script_file:
+                    script = GreasemonkeyScript.parse(script_file.read(),
+                                                      script_filename)
+                    if not script.name:
+                        script.name = script_filename
+                    self.add_script(script, force)
         self.scripts_reloaded.emit()
 
     def add_script(self, script, force=False):
         """Add a GreasemonkeyScript to this manager.
 
         Args:
-            force: Fetch and overwrite any dependancies which are
+            force: Fetch and overwrite any dependencies which are
                    already locally cached.
         """
         if script.requires:
@@ -275,7 +329,7 @@ class GreasemonkeyManager(QObject):
         log.greasemonkey.debug("Loaded script: {}".format(script.name))
 
     def _required_url_to_file_path(self, url):
-        requires_dir = os.path.join(_scripts_dir(), 'requires')
+        requires_dir = os.path.join(_scripts_dirs()[0], 'requires')
         if not os.path.exists(requires_dir):
             os.mkdir(requires_dir)
         return os.path.join(requires_dir, utils.sanitize_filename(url))
@@ -291,7 +345,7 @@ class GreasemonkeyManager(QObject):
     def _add_script_with_requires(self, script, quiet=False):
         """Add a script with pending downloads to this GreasemonkeyManager.
 
-        Specifically a script that has dependancies specified via an
+        Specifically a script that has dependencies specified via an
         `@require` rule.
 
         Args:
@@ -299,7 +353,7 @@ class GreasemonkeyManager(QObject):
             quiet: True to suppress the scripts_reloaded signal after
                    adding `script`.
         Returns: True if the script was added, False if there are still
-                 dependancies being downloaded.
+                 dependencies being downloaded.
         """
         # See if we are still waiting on any required scripts for this one
         for dl in self._in_progress_dls:
@@ -371,12 +425,27 @@ class GreasemonkeyManager(QObject):
         return self._run_start + self._run_end + self._run_idle
 
 
+@cmdutils.register()
+def greasemonkey_reload(force=False):
+    """Re-read Greasemonkey scripts from disk.
+
+    The scripts are read from a 'greasemonkey' subdirectory in
+    qutebrowser's data or config directories (see `:version`).
+
+    Args:
+        force: For any scripts that have required dependencies,
+                re-download them.
+    """
+    gm_manager.load_scripts(force=force)
+
+
 def init():
     """Initialize Greasemonkey support."""
+    global gm_manager
     gm_manager = GreasemonkeyManager()
-    objreg.register('greasemonkey', gm_manager)
 
-    try:
-        os.mkdir(_scripts_dir())
-    except FileExistsError:
-        pass
+    for scripts_dir in _scripts_dirs():
+        try:
+            os.mkdir(scripts_dir)
+        except FileExistsError:
+            pass

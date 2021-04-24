@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 # Because every method needs to have a log_stack argument
 # pylint: disable=unused-argument
@@ -23,39 +23,35 @@
 """Message singleton so we don't have to define unneeded signals."""
 
 import traceback
+from typing import Any, Callable, Iterable, List, Tuple, Union, Optional
 
-from PyQt5.QtCore import pyqtSignal, QObject
+from PyQt5.QtCore import pyqtSignal, pyqtBoundSignal, QObject
 
-from qutebrowser.utils import usertypes, log, utils
+from qutebrowser.utils import usertypes, log
 
 
-def _log_stack(typ, stack):
+def _log_stack(typ: str, stack: str) -> None:
     """Log the given message stacktrace.
 
     Args:
-        typ: The type of the message (str)
-        stack: The stack as an iterable of strings or a single string
+        typ: The type of the message.
+        stack: An optional stacktrace.
     """
-    try:
-        # traceback.format_exc() produces a list of strings, while
-        # traceback.format_stack() produces a single string...
-        stack = stack.splitlines()
-    except AttributeError:
-        pass
-    stack_text = '\n'.join(line.rstrip() for line in stack)
+    lines = stack.splitlines()
+    stack_text = '\n'.join(line.rstrip() for line in lines)
     log.message.debug("Stack for {} message:\n{}".format(typ, stack_text))
 
 
-def error(message, *, stack=None, replace=False):
-    """Convenience function to display an error message in the statusbar.
+def error(message: str, *, stack: str = None, replace: str = None) -> None:
+    """Display an error message.
 
     Args:
-        message: The message to show
-        stack: The stack trace to show.
-        replace: Replace existing messages with replace=True
+        message: The message to show.
+        stack: The stack trace to show (if any).
+        replace: Replace existing messages which are still being shown.
     """
     if stack is None:
-        stack = traceback.format_stack()
+        stack = ''.join(traceback.format_stack())
         typ = 'error'
     else:
         typ = 'error (from exception)'
@@ -64,46 +60,57 @@ def error(message, *, stack=None, replace=False):
     global_bridge.show(usertypes.MessageLevel.error, message, replace)
 
 
-def warning(message, *, replace=False):
-    """Convenience function to display a warning message in the statusbar.
+def warning(message: str, *, replace: str = None) -> None:
+    """Display a warning message.
 
     Args:
-        message: The message to show
-        replace: Replace existing messages with replace=True
+        message: The message to show.
+        replace: Replace existing messages which are still being shown.
     """
-    _log_stack('warning', traceback.format_stack())
+    _log_stack('warning', ''.join(traceback.format_stack()))
     log.message.warning(message)
     global_bridge.show(usertypes.MessageLevel.warning, message, replace)
 
 
-def info(message, *, replace=False):
-    """Convenience function to display an info message in the statusbar.
+def info(message: str, *, replace: str = None) -> None:
+    """Display an info message.
 
     Args:
-        message: The message to show
-        replace: Replace existing messages with replace=True
+        message: The message to show.
+        replace: Replace existing messages which are still being shown.
     """
     log.message.info(message)
     global_bridge.show(usertypes.MessageLevel.info, message, replace)
 
 
-def _build_question(title, text=None, *, mode, default=None, abort_on=(),
-                    url=None):
+def _build_question(title: str,
+                    text: str = None, *,
+                    mode: usertypes.PromptMode,
+                    default: Union[None, bool, str] = None,
+                    abort_on: Iterable[pyqtBoundSignal] = (),
+                    url: str = None,
+                    option: bool = None) -> usertypes.Question:
     """Common function for ask/ask_async."""
-    if not isinstance(mode, usertypes.PromptMode):
-        raise TypeError("Mode {} is no PromptMode member!".format(mode))
     question = usertypes.Question()
     question.title = title
     question.text = text
     question.mode = mode
     question.default = default
     question.url = url
+
+    if option is not None:
+        if mode != usertypes.PromptMode.yesno:
+            raise ValueError("Can only 'option' with PromptMode.yesno")
+        if url is None:
+            raise ValueError("Need 'url' given when 'option' is given")
+    question.option = option
+
     for sig in abort_on:
         sig.connect(question.abort)
     return question
 
 
-def ask(*args, **kwargs):
+def ask(*args: Any, **kwargs: Any) -> Any:
     """Ask a modular question in the statusbar (blocking).
 
     Args:
@@ -111,6 +118,8 @@ def ask(*args, **kwargs):
         mode: A PromptMode.
         default: The default value to display.
         text: Additional text to show
+        option: The option for always/never question answers.
+                Only available with PromptMode.yesno.
         abort_on: A list of signals which abort the question if emitted.
 
     Return:
@@ -123,7 +132,10 @@ def ask(*args, **kwargs):
     return answer
 
 
-def ask_async(title, mode, handler, **kwargs):
+def ask_async(title: str,
+              mode: usertypes.PromptMode,
+              handler: Callable[[Any], None],
+              **kwargs: Any) -> None:
     """Ask an async question in the statusbar.
 
     Args:
@@ -139,8 +151,13 @@ def ask_async(title, mode, handler, **kwargs):
     global_bridge.ask(question, blocking=False)
 
 
-def confirm_async(*, yes_action, no_action=None, cancel_action=None,
-                  **kwargs):
+_ActionType = Callable[[], Any]
+
+
+def confirm_async(*, yes_action: _ActionType,
+                  no_action: _ActionType = None,
+                  cancel_action: _ActionType = None,
+                  **kwargs: Any) -> usertypes.Question:
     """Ask a yes/no question to the user and execute the given actions.
 
     Args:
@@ -150,6 +167,7 @@ def confirm_async(*, yes_action, no_action=None, cancel_action=None,
         cancel_action: Callable to be called when the user cancelled the
                        question.
         default: True/False to set a default value, or None.
+        option: The option for always/never question answers.
         text: Additional text to show.
 
     Return:
@@ -180,8 +198,7 @@ class GlobalMessageBridge(QObject):
         show_message: Show a message
                       arg 0: A MessageLevel member
                       arg 1: The text to show
-                      arg 2: Whether to replace other messages with
-                             replace=True.
+                      arg 2: A message ID (as string) to replace, or None.
         prompt_done: Emitted when a prompt was answered somewhere.
         ask_question: Ask a question to the user.
                       arg 0: The Question object to ask.
@@ -192,18 +209,20 @@ class GlobalMessageBridge(QObject):
         mode_left: Emitted when a keymode was left in any window.
     """
 
-    show_message = pyqtSignal(usertypes.MessageLevel, str, bool)
+    show_message = pyqtSignal(usertypes.MessageLevel, str, str)
     prompt_done = pyqtSignal(usertypes.KeyMode)
     ask_question = pyqtSignal(usertypes.Question, bool)
     mode_left = pyqtSignal(usertypes.KeyMode)
     clear_messages = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QObject = None) -> None:
         super().__init__(parent)
         self._connected = False
-        self._cache = []
+        self._cache: List[Tuple[usertypes.MessageLevel, str, Optional[str]]] = []
 
-    def ask(self, question, blocking, *, log_stack=False):
+    def ask(self, question: usertypes.Question,
+            blocking: bool, *,
+            log_stack: bool = False) -> None:
         """Ask a question to the user.
 
         Note this method doesn't return the answer, it only blocks. The caller
@@ -217,14 +236,16 @@ class GlobalMessageBridge(QObject):
         """
         self.ask_question.emit(question, blocking)
 
-    def show(self, level, text, replace=False):
+    def show(self, level: usertypes.MessageLevel,
+             text: str,
+             replace: str = None) -> None:
         """Show the given message."""
         if self._connected:
             self.show_message.emit(level, text, replace)
         else:
             self._cache.append((level, text, replace))
 
-    def flush(self):
+    def flush(self) -> None:
         """Flush messages which accumulated while no handler was connected.
 
         This is so we don't miss messages shown during some early init phase.
@@ -234,44 +255,6 @@ class GlobalMessageBridge(QObject):
         for args in self._cache:
             self.show(*args)
         self._cache = []
-
-
-class MessageBridge(QObject):
-
-    """Bridge for messages to be shown in the statusbar.
-
-    Signals:
-        s_set_text: Set a persistent text in the statusbar.
-                    arg: The text to set.
-        s_maybe_reset_text: Reset the text if it hasn't been changed yet.
-                            arg: The expected text.
-    """
-
-    s_set_text = pyqtSignal(str)
-    s_maybe_reset_text = pyqtSignal(str)
-
-    def __repr__(self):
-        return utils.get_repr(self)
-
-    def set_text(self, text, *, log_stack=False):
-        """Set the normal text of the statusbar.
-
-        Args:
-            text: The text to set.
-            log_stack: ignored
-        """
-        text = str(text)
-        log.message.debug(text)
-        self.s_set_text.emit(text)
-
-    def maybe_reset_text(self, text, *, log_stack=False):
-        """Reset the text in the statusbar if it matches an expected text.
-
-        Args:
-            text: The expected text.
-            log_stack: ignored
-        """
-        self.s_maybe_reset_text.emit(str(text))
 
 
 global_bridge = GlobalMessageBridge()

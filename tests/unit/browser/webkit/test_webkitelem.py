@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,24 +15,27 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Tests for the webelement utils."""
 
+from typing import TYPE_CHECKING
 from unittest import mock
 import collections.abc
 import operator
 import itertools
+import dataclasses
 
-import attr
 import pytest
 from PyQt5.QtCore import QRect, QPoint, QUrl
 QWebElement = pytest.importorskip('PyQt5.QtWebKit').QWebElement
 
-from qutebrowser.browser import webelem, browsertab
+from qutebrowser.browser import browsertab
 from qutebrowser.browser.webkit import webkitelem
 from qutebrowser.misc import objects
 from qutebrowser.utils import usertypes
+if TYPE_CHECKING:
+    from helpers import stubs
 
 
 def get_webelem(geometry=None, frame=None, *, null=False, style=None,
@@ -146,53 +149,48 @@ class SelectionAndFilterTests:
     TESTS = [
         ('<foo />', []),
         ('<foo bar="baz"/>', []),
-        ('<foo href="baz"/>', [webelem.Group.url]),
-        ('<foo src="baz"/>', [webelem.Group.url]),
+        ('<foo href="baz"/>', ['url']),
+        ('<foo src="baz"/>', ['url']),
 
-        ('<a />', [webelem.Group.all]),
-        ('<a href="foo" />', [webelem.Group.all, webelem.Group.links,
-                              webelem.Group.url]),
-        ('<a href="javascript://foo" />', [webelem.Group.all,
-                                           webelem.Group.links,
-                                           webelem.Group.url]),
+        ('<a />', ['all']),
+        ('<a href="foo" />', ['all', 'links', 'url']),
+        ('<a href="javascript://foo" />', ['all', 'links', 'url']),
 
-        ('<area />', [webelem.Group.all]),
-        ('<area href="foo" />', [webelem.Group.all, webelem.Group.links,
-                                 webelem.Group.url]),
+        ('<area />', ['all']),
+        ('<area href="foo" />', ['all', 'links', 'url']),
 
-        ('<link />', [webelem.Group.all]),
-        ('<link href="foo" />', [webelem.Group.all, webelem.Group.links,
-                                 webelem.Group.url]),
+        ('<link />', ['all']),
+        ('<link href="foo" />', ['all', 'links', 'url']),
 
-        ('<textarea />', [webelem.Group.all, webelem.Group.inputs]),
-        ('<select />', [webelem.Group.all]),
+        ('<textarea />', ['all', 'inputs']),
+        ('<select />', ['all']),
 
-        ('<input />', [webelem.Group.all, webelem.Group.inputs]),
+        ('<input />', ['all', 'inputs']),
         ('<input type="hidden" />', []),
-        ('<input type="text" />', [webelem.Group.inputs, webelem.Group.all]),
-        ('<input type="email" />', [webelem.Group.inputs, webelem.Group.all]),
-        ('<input type="url" />', [webelem.Group.inputs, webelem.Group.all]),
-        ('<input type="tel" />', [webelem.Group.inputs, webelem.Group.all]),
-        ('<input type="number" />', [webelem.Group.inputs, webelem.Group.all]),
-        ('<input type="password" />', [webelem.Group.inputs,
-                                       webelem.Group.all]),
-        ('<input type="search" />', [webelem.Group.inputs, webelem.Group.all]),
+        ('<input type="text" />', ['inputs', 'all']),
+        ('<input type="email" />', ['inputs', 'all']),
+        ('<input type="url" />', ['inputs', 'all']),
+        ('<input type="tel" />', ['inputs', 'all']),
+        ('<input type="number" />', ['inputs', 'all']),
+        ('<input type="password" />', ['inputs', 'all']),
+        ('<input type="search" />', ['inputs', 'all']),
 
-        ('<button />', [webelem.Group.all]),
-        ('<button href="foo" />', [webelem.Group.all, webelem.Group.url]),
+        ('<button />', ['all']),
+        ('<button href="foo" />', ['all', 'url']),
 
         # We can't easily test <frame>/<iframe> as they vanish when setting
         # them via QWebFrame::setHtml...
 
-        ('<p onclick="foo" foo="bar"/>', [webelem.Group.all]),
-        ('<p onmousedown="foo" foo="bar"/>', [webelem.Group.all]),
-        ('<p role="option" foo="bar"/>', [webelem.Group.all]),
-        ('<p role="button" foo="bar"/>', [webelem.Group.all]),
-        ('<p role="button" href="bar"/>', [webelem.Group.all,
-                                           webelem.Group.url]),
+        ('<p onclick="foo" foo="bar"/>', ['all']),
+        ('<p onmousedown="foo" foo="bar"/>', ['all']),
+        ('<p role="option" foo="bar"/>', ['all']),
+        ('<p role="button" foo="bar"/>', ['all']),
+        ('<p role="button" href="bar"/>', ['all', 'url']),
+
+        ('<span tabindex=0 />', ['all']),
     ]
 
-    GROUPS = list(webelem.Group)
+    GROUPS = ['all', 'links', 'images', 'url', 'inputs']
 
     COMBINATIONS = list(itertools.product(TESTS, GROUPS))
 
@@ -215,11 +213,12 @@ class TestSelectorsAndFilters:
         assert self.TESTS
 
     @pytest.mark.parametrize('group, val, matching', TESTS)
-    def test_selectors(self, webframe, group, val, matching):
+    def test_selectors(self, webframe, group, val, matching, config_stub):
         webframe.setHtml('<html><body>{}</body></html>'.format(val))
         # Make sure setting HTML succeeded and there's a new element
         assert len(webframe.findAllElements('*')) == 3
-        elems = webframe.findAllElements(webelem.SELECTORS[group])
+        selector = ','.join(config_stub.val.hints.selectors[group])
+        elems = webframe.findAllElements(selector)
         elems = [webkitelem.WebKitElement(e, tab=None) for e in elems]
         assert bool(elems) == matching
 
@@ -251,7 +250,7 @@ class TestWebKitElement:
         pytest.param(lambda e: e[None], id='getitem'),
         pytest.param(lambda e: operator.setitem(e, None, None), id='setitem'),
         pytest.param(lambda e: operator.delitem(e, None), id='delitem'),
-        pytest.param(lambda e: None in e, id='contains'),
+        pytest.param(lambda e: '' in e, id='contains'),
         pytest.param(list, id='iter'),
         pytest.param(len, id='len'),
         pytest.param(lambda e: e.has_frame(), id='has_frame'),
@@ -267,6 +266,8 @@ class TestWebKitElement:
         pytest.param(lambda e: e.remove_blank_target(),
                      id='remove_blank_target'),
         pytest.param(lambda e: e.outer_xml(), id='outer_xml'),
+        pytest.param(lambda e: e.is_content_editable_prop(),
+                     id='is_content_editable_prop'),
         pytest.param(lambda e: e.tag_name(), id='tag_name'),
         pytest.param(lambda e: e.rect_on_view(), id='rect_on_view'),
         pytest.param(lambda e: e._is_visible(None), id='is_visible'),
@@ -302,7 +303,7 @@ class TestWebKitElement:
 
     def test_getitem_keyerror(self, elem):
         with pytest.raises(KeyError):
-            elem['foo']  # pylint: disable=pointless-statement
+            elem['foo']
 
     def test_setitem(self, elem):
         elem['foo'] = 'bar'
@@ -391,7 +392,7 @@ class TestWebKitElement:
     def test_simple_getters(self, elem, attribute, code):
         sentinel = object()
         mock = getattr(elem._elem, attribute)
-        setattr(mock, 'return_value', sentinel)
+        mock.return_value = sentinel
         assert code(elem) is sentinel
 
     @pytest.mark.parametrize('frame, expected', [
@@ -529,12 +530,12 @@ class TestIsVisibleIframe:
         elem1-elem4: FakeWebElements to test.
     """
 
-    @attr.s
+    @dataclasses.dataclass
     class Objects:
 
-        frame = attr.ib()
-        iframe = attr.ib()
-        elems = attr.ib()
+        frame: 'stubs.FakeWebFrame'
+        iframe: 'stubs.FakeWebFrame'
+        elems: webkitelem.WebKitElement
 
     @pytest.fixture
     def objects(self, stubs):
@@ -745,8 +746,8 @@ class TestGetChildFrames:
     def test_one_level(self, stubs):
         r"""Test get_child_frames with one level of children.
 
-                  o   parent
-                 / \
+                  o    parent
+                 / \   ------
         child1  o   o  child2
         """
         child1 = stubs.FakeChildrenFrame()
@@ -765,9 +766,9 @@ class TestGetChildFrames:
         r"""Test get_child_frames with multiple levels of children.
 
             o      root
-           / \
+           / \     ------
           o   o    first
-         /\   /\
+         /\   /\   ------
         o  o o  o  second
         """
         second = [stubs.FakeChildrenFrame() for _ in range(4)]
@@ -820,7 +821,19 @@ class TestIsEditable:
     ])
     def test_is_editable(self, tagname, attributes, editable):
         elem = get_webelem(tagname=tagname, attributes=attributes)
+        elem._elem.evaluateJavaScript.return_value = False
         assert elem.is_editable() == editable
+
+    @pytest.mark.parametrize('strict, attributes, expected', [
+        (False, {}, True),
+        (False, {'disabled': 'true'}, False),
+        (False, {'readonly': 'true'}, False),
+        (True, {}, False),
+    ])
+    def test_is_editable_content_editable(self, strict, attributes, expected):
+        elem = get_webelem(tagname='foobar', attributes=attributes)
+        elem._elem.evaluateJavaScript.return_value = True
+        assert elem.is_editable(strict=strict) == expected
 
     @pytest.mark.parametrize('classes, editable', [
         (None, False),
@@ -831,6 +844,7 @@ class TestIsEditable:
     ])
     def test_is_editable_div(self, classes, editable):
         elem = get_webelem(tagname='div', classes=classes)
+        elem._elem.evaluateJavaScript.return_value = False
         assert elem.is_editable() == editable
 
     @pytest.mark.parametrize('setting, tagname, attributes, editable', [
@@ -849,6 +863,7 @@ class TestIsEditable:
                                 setting, tagname, attributes, editable):
         config_stub.val.input.insert_mode.plugins = setting
         elem = get_webelem(tagname=tagname, attributes=attributes)
+        elem._elem.evaluateJavaScript.return_value = False
         assert elem.is_editable() == editable
 
 

@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2018 Jay Kamat <jaygkamat@gmail.com>
+# Copyright 2018-2021 Jay Kamat <jaygkamat@gmail.com>
 #
 # This file is part of qutebrowser.
 #
@@ -15,10 +15,12 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 
 """Implementation of a basic config cache."""
+
+from typing import Any, Dict
 
 from qutebrowser.config import config
 
@@ -28,23 +30,25 @@ class ConfigCache:
     """A 'high-performance' cache for the config system.
 
     Useful for areas which call out to the config system very frequently, DO
-    NOT modify the value returned, DO NOT require per-url settings, do not
-    change frequently, and do not require partially 'expanded' config paths.
+    NOT modify the value returned, DO NOT require per-url settings, and do not
+    require partially 'expanded' config paths.
 
     If any of these requirements are broken, you will get incorrect or slow
     behavior.
     """
 
     def __init__(self) -> None:
-        self._cache = {}
+        self._cache: Dict[str, Any] = {}
         config.instance.changed.connect(self._on_config_changed)
 
     def _on_config_changed(self, attr: str) -> None:
         if attr in self._cache:
-            self._cache[attr] = config.instance.get(attr)
+            del self._cache[attr]
 
-    def __getitem__(self, attr: str):
-        if attr not in self._cache:
+    def __getitem__(self, attr: str) -> Any:
+        try:
+            return self._cache[attr]
+        except KeyError:
             assert not config.instance.get_opt(attr).supports_pattern
-            self._cache[attr] = config.instance.get(attr)
-        return self._cache[attr]
+            result = self._cache[attr] = config.instance.get(attr)
+            return result

@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2016-2018 Ryan Roden-Corrent (rcorre) <ryan@rcorre.net>
+# Copyright 2016-2021 Ryan Roden-Corrent (rcorre) <ryan@rcorre.net>
 #
 # This file is part of qutebrowser.
 #
@@ -15,12 +15,14 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Test the SQL API."""
 
 import pytest
 
+import hypothesis
+from hypothesis import strategies
 from PyQt5.QtSql import QSqlError
 
 from qutebrowser.misc import sql
@@ -29,7 +31,56 @@ from qutebrowser.misc import sql
 pytestmark = pytest.mark.usefixtures('init_sql')
 
 
-@pytest.mark.parametrize('klass', [sql.SqlEnvironmentError, sql.SqlBugError])
+class TestUserVersion:
+
+    @pytest.mark.parametrize('val, major, minor', [
+        (0x0008_0001, 8, 1),
+        (0x7FFF_FFFF, 0x7FFF, 0xFFFF),
+    ])
+    def test_from_int(self, val, major, minor):
+        version = sql.UserVersion.from_int(val)
+        assert version.major == major
+        assert version.minor == minor
+
+    @pytest.mark.parametrize('major, minor, val', [
+        (8, 1, 0x0008_0001),
+        (0x7FFF, 0xFFFF, 0x7FFF_FFFF),
+    ])
+    def test_to_int(self, major, minor, val):
+        version = sql.UserVersion(major, minor)
+        assert version.to_int() == val
+
+    @pytest.mark.parametrize('val', [0x8000_0000, -1])
+    def test_from_int_invalid(self, val):
+        with pytest.raises(AssertionError):
+            sql.UserVersion.from_int(val)
+
+    @pytest.mark.parametrize('major, minor', [
+        (-1, 0),
+        (0, -1),
+        (0, 0x10000),
+        (0x8000, 0),
+    ])
+    def test_to_int_invalid(self, major, minor):
+        version = sql.UserVersion(major, minor)
+        with pytest.raises(AssertionError):
+            version.to_int()
+
+    @hypothesis.given(val=strategies.integers(min_value=0, max_value=0x7FFF_FFFF))
+    def test_from_int_hypothesis(self, val):
+        version = sql.UserVersion.from_int(val)
+        assert version.to_int() == val
+
+    @hypothesis.given(
+        major=strategies.integers(min_value=0, max_value=0x7FFF),
+        minor=strategies.integers(min_value=0, max_value=0xFFFF)
+    )
+    def test_to_int_hypothesis(self, major, minor):
+        version = sql.UserVersion(major, minor)
+        assert version.from_int(version.to_int()) == version
+
+
+@pytest.mark.parametrize('klass', [sql.KnownError, sql.BugError])
 def test_sqlerror(klass):
     text = "Hello World"
     err = klass(text)
@@ -40,45 +91,29 @@ def test_sqlerror(klass):
 class TestSqlError:
 
     @pytest.mark.parametrize('error_code, exception', [
-        (sql.SqliteErrorCode.BUSY, sql.SqlEnvironmentError),
-        (sql.SqliteErrorCode.CONSTRAINT, sql.SqlBugError),
+        (sql.SqliteErrorCode.BUSY, sql.KnownError),
+        (sql.SqliteErrorCode.CONSTRAINT, sql.BugError),
     ])
-    def test_environmental(self, error_code, exception):
+    def test_known(self, error_code, exception):
         sql_err = QSqlError("driver text", "db text", QSqlError.UnknownError,
                             error_code)
         with pytest.raises(exception):
             sql.raise_sqlite_error("Message", sql_err)
 
-    def test_qtbug_70506(self):
-        """Test Qt's wrong handling of errors while opening the database.
-
-        Due to https://bugreports.qt.io/browse/QTBUG-70506 we get an error with
-        "out of memory" as string and -1 as error code.
-        """
-        sql_err = QSqlError("Error opening database",
-                            "out of memory",
-                            QSqlError.UnknownError,
-                            sql.SqliteErrorCode.UNKNOWN)
-        with pytest.raises(sql.SqlEnvironmentError):
-            sql.raise_sqlite_error("Message", sql_err)
-
     def test_logging(self, caplog):
-        sql_err = QSqlError("driver text", "db text", QSqlError.UnknownError,
-                            '23')
-        with pytest.raises(sql.SqlBugError):
+        sql_err = QSqlError("driver text", "db text", QSqlError.UnknownError, '23')
+        with pytest.raises(sql.BugError):
             sql.raise_sqlite_error("Message", sql_err)
 
-        lines = [r.message for r in caplog.records]
         expected = ['SQL error:',
                     'type: UnknownError',
                     'database text: db text',
                     'driver text: driver text',
                     'error code: 23']
 
-        assert lines == expected
+        assert caplog.messages == expected
 
-    @pytest.mark.parametrize('klass',
-                             [sql.SqlEnvironmentError, sql.SqlBugError])
+    @pytest.mark.parametrize('klass', [sql.KnownError, sql.BugError])
     def test_text(self, klass):
         sql_err = QSqlError("driver text", "db text")
         err = klass("Message", sql_err)
@@ -93,29 +128,29 @@ def test_init():
 
 def test_insert(qtbot):
     table = sql.SqlTable('Foo', ['name', 'val', 'lucky'])
-    with qtbot.waitSignal(table.changed):
+    with qtbot.wait_signal(table.changed):
         table.insert({'name': 'one', 'val': 1, 'lucky': False})
-    with qtbot.waitSignal(table.changed):
+    with qtbot.wait_signal(table.changed):
         table.insert({'name': 'wan', 'val': 1, 'lucky': False})
 
 
 def test_insert_replace(qtbot):
     table = sql.SqlTable('Foo', ['name', 'val', 'lucky'],
                          constraints={'name': 'PRIMARY KEY'})
-    with qtbot.waitSignal(table.changed):
+    with qtbot.wait_signal(table.changed):
         table.insert({'name': 'one', 'val': 1, 'lucky': False}, replace=True)
-    with qtbot.waitSignal(table.changed):
+    with qtbot.wait_signal(table.changed):
         table.insert({'name': 'one', 'val': 11, 'lucky': True}, replace=True)
     assert list(table) == [('one', 11, True)]
 
-    with pytest.raises(sql.SqlBugError):
+    with pytest.raises(sql.BugError):
         table.insert({'name': 'one', 'val': 11, 'lucky': True}, replace=False)
 
 
 def test_insert_batch(qtbot):
     table = sql.SqlTable('Foo', ['name', 'val', 'lucky'])
 
-    with qtbot.waitSignal(table.changed):
+    with qtbot.wait_signal(table.changed):
         table.insert_batch({'name': ['one', 'nine', 'thirteen'],
                             'val': [1, 9, 13],
                             'lucky': [False, False, True]})
@@ -129,12 +164,12 @@ def test_insert_batch_replace(qtbot):
     table = sql.SqlTable('Foo', ['name', 'val', 'lucky'],
                          constraints={'name': 'PRIMARY KEY'})
 
-    with qtbot.waitSignal(table.changed):
+    with qtbot.wait_signal(table.changed):
         table.insert_batch({'name': ['one', 'nine', 'thirteen'],
                             'val': [1, 9, 13],
                             'lucky': [False, False, True]})
 
-    with qtbot.waitSignal(table.changed):
+    with qtbot.wait_signal(table.changed):
         table.insert_batch({'name': ['one', 'nine'],
                             'val': [11, 19],
                             'lucky': [True, True]},
@@ -144,7 +179,7 @@ def test_insert_batch_replace(qtbot):
                            ('one', 11, True),
                            ('nine', 19, True)]
 
-    with pytest.raises(sql.SqlBugError):
+    with pytest.raises(sql.BugError):
         table.insert_batch({'name': ['one', 'nine'],
                             'val': [11, 19],
                             'lucky': [True, True]})
@@ -184,10 +219,10 @@ def test_delete(qtbot):
     table.insert({'name': 'thirteen', 'val': 13, 'lucky': True})
     with pytest.raises(KeyError):
         table.delete('name', 'nope')
-    with qtbot.waitSignal(table.changed):
+    with qtbot.wait_signal(table.changed):
         table.delete('name', 'thirteen')
     assert list(table) == [('one', 1, False), ('nine', 9, False)]
-    with qtbot.waitSignal(table.changed):
+    with qtbot.wait_signal(table.changed):
         table.delete('lucky', False)
     assert not list(table)
 
@@ -201,6 +236,26 @@ def test_len():
     assert len(table) == 2
     table.insert({'name': 'thirteen', 'val': 13, 'lucky': True})
     assert len(table) == 3
+
+
+def test_bool():
+    table = sql.SqlTable('Foo', ['name'])
+    assert not table
+    table.insert({'name': 'one'})
+    assert table
+
+
+def test_bool_benchmark(benchmark):
+    table = sql.SqlTable('Foo', ['number'])
+
+    # Simulate a history table
+    table.create_index('NumberIndex', 'number')
+    table.insert_batch({'number': [str(i) for i in range(100_000)]})
+
+    def run():
+        assert table
+
+    benchmark(run)
 
 
 def test_contains():
@@ -229,7 +284,7 @@ def test_delete_all(qtbot):
     table.insert({'name': 'one', 'val': 1, 'lucky': False})
     table.insert({'name': 'nine', 'val': 9, 'lucky': False})
     table.insert({'name': 'thirteen', 'val': 13, 'lucky': True})
-    with qtbot.waitSignal(table.changed):
+    with qtbot.wait_signal(table.changed):
         table.delete_all()
     assert list(table) == []
 
@@ -241,7 +296,7 @@ def test_version():
 class TestSqlQuery:
 
     def test_prepare_error(self):
-        with pytest.raises(sql.SqlBugError) as excinfo:
+        with pytest.raises(sql.BugError) as excinfo:
             sql.Query('invalid')
 
         expected = ('Failed to prepare query "invalid": "near "invalid": '
@@ -255,7 +310,7 @@ class TestSqlQuery:
 
     def test_iter_inactive(self):
         q = sql.Query('SELECT 0')
-        with pytest.raises(sql.SqlBugError,
+        with pytest.raises(sql.BugError,
                            match='Cannot iterate inactive query'):
             next(iter(q))
 
@@ -284,7 +339,7 @@ class TestSqlQuery:
 
     def test_run_missing_binding(self):
         q = sql.Query('SELECT :answer')
-        with pytest.raises(sql.SqlBugError, match='Missing bound values!'):
+        with pytest.raises(sql.BugError, match='Missing bound values!'):
             q.run()
 
     def test_run_batch(self):
@@ -294,20 +349,34 @@ class TestSqlQuery:
 
     def test_run_batch_missing_binding(self):
         q = sql.Query('SELECT :answer')
-        with pytest.raises(sql.SqlBugError, match='Missing bound values!'):
+        with pytest.raises(sql.BugError, match='Missing bound values!'):
             q.run_batch(values={})
 
     def test_value_missing(self):
         q = sql.Query('SELECT 0 WHERE 0')
         q.run()
-        with pytest.raises(sql.SqlBugError,
+        with pytest.raises(sql.BugError,
                            match='No result for single-result query'):
             q.value()
 
-    def test_num_rows_affected(self):
-        q = sql.Query('SELECT 0')
+    def test_num_rows_affected_not_active(self):
+        with pytest.raises(AssertionError):
+            q = sql.Query('SELECT 0')
+            q.rows_affected()
+
+    def test_num_rows_affected_select(self):
+        with pytest.raises(AssertionError):
+            q = sql.Query('SELECT 0')
+            q.run()
+            q.rows_affected()
+
+    @pytest.mark.parametrize('condition', [0, 1])
+    def test_num_rows_affected(self, condition):
+        table = sql.SqlTable('Foo', ['name'])
+        table.insert({'name': 'helloworld'})
+        q = sql.Query(f'DELETE FROM Foo WHERE {condition}')
         q.run()
-        assert q.rows_affected() == 0
+        assert q.rows_affected() == condition
 
     def test_bound_values(self):
         q = sql.Query('SELECT :answer')

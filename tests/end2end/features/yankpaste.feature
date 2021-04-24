@@ -41,6 +41,12 @@ Feature: Yanking and pasting.
         Then the message "Yanked title to clipboard: Test title" should be shown
         And the clipboard should contain "Test title"
 
+    Scenario: Yanking inline to clipboard
+        When I open data/title.html
+        And I run :yank inline '[[{url}][qutebrowser</3org]]'
+        Then the message "Yanked inline block to clipboard: [[http://localhost:(port)/data/title.html][qutebrowser</3org]]" should be shown
+        And the clipboard should contain "[[http://localhost:(port)/data/title.html][qutebrowser</3org]]"
+
     Scenario: Yanking domain to clipboard
         When I open data/title.html
         And I run :yank domain
@@ -76,6 +82,11 @@ Feature: Yanking and pasting.
 		And I run :yank
 		Then the message "Yanked URL to clipboard: http://localhost:(port)/data/title.html?a;b&c=d" should be shown
 		And the clipboard should contain "http://localhost:(port)/data/title.html?a;b&c=d"
+
+    Scenario: Yanking with --quiet
+        When I open data/title.html
+        And I run :yank --quiet
+        Then "Yanked URL to clipboard: *" should not be logged
 
     #### {clipboard} and {primary}
 
@@ -296,6 +307,7 @@ Feature: Yanking and pasting.
         And I run :insert-text This text should be undone
         And I wait for the javascript message "textarea contents: This text should be undone"
         And I press the key "<Ctrl+z>"
+        And I wait for the javascript message "textarea contents: "
         # Paste final text
         And I run :insert-text This text should stay
         # Compare
@@ -303,7 +315,7 @@ Feature: Yanking and pasting.
 
     Scenario: Inserting text without a focused field
         When I open data/paste_primary.html
-        And I run :enter-mode insert
+        And I run :mode-enter insert
         And I run :insert-text test
         Then the error "No element focused!" should be shown
 
@@ -311,6 +323,6 @@ Feature: Yanking and pasting.
         When I open data/paste_primary.html
         And I run :click-element id qute-textarea-noedit
         And I wait for "Clicked non-editable element!" in the log
-        And I run :enter-mode insert
+        And I run :mode-enter insert
         And I run :insert-text test
         Then the error "Element is not editable!" should be shown

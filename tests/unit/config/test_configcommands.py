@@ -1,5 +1,5 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 
 # This file is part of qutebrowser.
 #
@@ -14,7 +14,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Tests for qutebrowser.config.configcommands."""
 
@@ -25,8 +25,8 @@ import unittest.mock
 import pytest
 from PyQt5.QtCore import QUrl
 
-from qutebrowser.config import configcommands, configutils
-from qutebrowser.commands import cmdexc
+from qutebrowser.config import configcommands
+from qutebrowser.api import cmdutils
 from qutebrowser.utils import usertypes, urlmatch
 from qutebrowser.keyinput import keyutils
 from qutebrowser.misc import objects
@@ -59,7 +59,7 @@ class TestSet:
 
         Should open qute://settings."""
         commands.set(win_id=0)
-        assert tabbed_browser_stubs[0].opened_url == QUrl('qute://settings')
+        assert tabbed_browser_stubs[0].loaded_url == QUrl('qute://settings')
 
     @pytest.mark.parametrize('option', ['url.auto_search?', 'url.auto_search'])
     def test_get(self, config_stub, commands, message_mock, option):
@@ -92,7 +92,7 @@ class TestSet:
         commands.set(0, option, inp, temp=temp)
 
         assert config_stub.get(option) == new_value
-        assert yaml_value(option) == (configutils.UNSET if temp else new_value)
+        assert yaml_value(option) == (usertypes.UNSET if temp else new_value)
 
     def test_set_with_pattern(self, monkeypatch, commands, config_stub):
         monkeypatch.setattr(objects, 'backend', usertypes.Backend.QtWebKit)
@@ -108,7 +108,7 @@ class TestSet:
         monkeypatch.setattr(objects, 'backend', usertypes.Backend.QtWebKit)
         option = 'content.javascript.enabled'
 
-        with pytest.raises(cmdexc.CommandError,
+        with pytest.raises(cmdutils.CommandError,
                            match=('Error while parsing http://: Pattern '
                                   'without host')):
             commands.set(0, option, 'false', pattern='http://')
@@ -118,7 +118,7 @@ class TestSet:
 
         Should show an error as patterns are unsupported.
         """
-        with pytest.raises(cmdexc.CommandError,
+        with pytest.raises(cmdutils.CommandError,
                            match='does not support URL patterns'):
             commands.set(0, 'colors.statusbar.normal.bg', '#abcdef',
                          pattern='*://*')
@@ -165,7 +165,7 @@ class TestSet:
 
         Should show an error.
         """
-        with pytest.raises(cmdexc.CommandError, match="No option 'foo'"):
+        with pytest.raises(cmdutils.CommandError, match="No option 'foo'"):
             commands.set(0, 'foo', 'bar')
 
     def test_set_invalid_value(self, commands):
@@ -173,13 +173,13 @@ class TestSet:
 
         Should show an error.
         """
-        with pytest.raises(cmdexc.CommandError,
+        with pytest.raises(cmdutils.CommandError,
                            match="Invalid value 'blah' - must be a boolean!"):
             commands.set(0, 'auto_save.session', 'blah')
 
     def test_set_wrong_backend(self, commands, monkeypatch):
         monkeypatch.setattr(objects, 'backend', usertypes.Backend.QtWebEngine)
-        with pytest.raises(cmdexc.CommandError,
+        with pytest.raises(cmdutils.CommandError,
                            match="The hints.find_implementation setting is "
                            "not available with the QtWebEngine backend!"):
             commands.set(0, 'hints.find_implementation', 'javascript')
@@ -190,7 +190,7 @@ class TestSet:
         Should show an error.
         See https://github.com/qutebrowser/qutebrowser/issues/1109
         """
-        with pytest.raises(cmdexc.CommandError, match="No option '?'"):
+        with pytest.raises(cmdutils.CommandError, match="No option '?'"):
             commands.set(win_id=0, option='?')
 
     def test_toggle(self, commands):
@@ -198,7 +198,7 @@ class TestSet:
 
         Should show an nicer error.
         """
-        with pytest.raises(cmdexc.CommandError,
+        with pytest.raises(cmdutils.CommandError,
                            match="Toggling values was moved to the "
                                  ":config-cycle command"):
             commands.set(win_id=0, option='javascript.enabled!')
@@ -208,8 +208,16 @@ class TestSet:
 
         Should show an error.
         """
-        with pytest.raises(cmdexc.CommandError, match="No option 'foo'"):
+        with pytest.raises(cmdutils.CommandError, match="No option 'foo'"):
             commands.set(win_id=0, option='foo?')
+
+
+def test_diff(commands, tabbed_browser_stubs):
+    """Run ':config-diff'.
+
+    Should open qute://configdiff."""
+    commands.config_diff(win_id=0)
+    assert tabbed_browser_stubs[0].loaded_url == QUrl('qute://configdiff')
 
 
 class TestCycle:
@@ -267,7 +275,7 @@ class TestCycle:
         Should show an error.
         """
         assert config_stub.val.url.auto_search == 'naive'
-        with pytest.raises(cmdexc.CommandError, match="Need at least "
+        with pytest.raises(cmdutils.CommandError, match="Need at least "
                            "two values for non-boolean settings."):
             commands.config_cycle(*args)
         assert config_stub.val.url.auto_search == 'naive'
@@ -282,6 +290,158 @@ class TestCycle:
         assert msg.text == 'auto_save.session = true'
 
 
+class TestAdd:
+
+    """Test :config-list-add and :config-dict-add."""
+
+    @pytest.mark.parametrize('temp', [True, False])
+    @pytest.mark.parametrize('value', ['test1', 'test2'])
+    def test_list_add(self, commands, config_stub, yaml_value, temp, value):
+        name = 'content.blocking.whitelist'
+
+        commands.config_list_add(name, value, temp=temp)
+
+        assert str(config_stub.get(name)[-1]) == value
+        if temp:
+            assert yaml_value(name) == usertypes.UNSET
+        else:
+            assert yaml_value(name)[-1] == value
+
+    def test_list_add_invalid_option(self, commands):
+        with pytest.raises(
+                cmdutils.CommandError,
+                match="No option 'nonexistent'"):
+            commands.config_list_add('nonexistent', 'value')
+
+    def test_list_add_non_list(self, commands):
+        with pytest.raises(
+                cmdutils.CommandError,
+                match=":config-list-add can only be used for lists"):
+            commands.config_list_add('history_gap_interval', 'value')
+
+    @pytest.mark.parametrize('value', ['', None, 42])
+    def test_list_add_invalid_values(self, commands, value):
+        with pytest.raises(
+                cmdutils.CommandError,
+                match="Invalid value '{}'".format(value)):
+            commands.config_list_add('content.blocking.whitelist', value)
+
+    @pytest.mark.parametrize('value', ['test1', 'test2'])
+    @pytest.mark.parametrize('temp', [True, False])
+    def test_dict_add(self, commands, config_stub, yaml_value, value, temp):
+        name = 'aliases'
+        key = 'missingkey'
+
+        commands.config_dict_add(name, key, value, temp=temp)
+
+        assert str(config_stub.get(name)[key]) == value
+        if temp:
+            assert yaml_value(name) == usertypes.UNSET
+        else:
+            assert yaml_value(name)[key] == value
+
+    @pytest.mark.parametrize('replace', [True, False])
+    def test_dict_add_replace(self, commands, config_stub, replace):
+        name = 'aliases'
+        key = 'w'
+        value = 'anything'
+
+        if replace:
+            commands.config_dict_add(name, key, value, replace=True)
+            assert str(config_stub.get(name)[key]) == value
+        else:
+            with pytest.raises(
+                    cmdutils.CommandError,
+                    match="w already exists in aliases - use --replace to "
+                          "overwrite!"):
+                commands.config_dict_add(name, key, value, replace=False)
+
+    def test_dict_add_invalid_option(self, commands):
+        with pytest.raises(
+                cmdutils.CommandError,
+                match="No option 'nonexistent'"):
+            commands.config_dict_add('nonexistent', 'key', 'value')
+
+    def test_dict_add_non_dict(self, commands):
+        with pytest.raises(
+                cmdutils.CommandError,
+                match=":config-dict-add can only be used for dicts"):
+            commands.config_dict_add('history_gap_interval', 'key', 'value')
+
+    @pytest.mark.parametrize('value', ['', None, 42])
+    def test_dict_add_invalid_values(self, commands, value):
+        with pytest.raises(cmdutils.CommandError,
+                           match="Invalid value '{}'".format(value)):
+            commands.config_dict_add('aliases', 'missingkey', value)
+
+
+class TestRemove:
+
+    """Test :config-list-remove and :config-dict-remove."""
+
+    @pytest.mark.parametrize('value', ['25%', '50%'])
+    @pytest.mark.parametrize('temp', [True, False])
+    def test_list_remove(self, commands, config_stub, yaml_value, value, temp):
+        name = 'zoom.levels'
+        commands.config_list_remove(name, value, temp=temp)
+
+        assert value not in config_stub.get(name)
+        if temp:
+            assert yaml_value(name) == usertypes.UNSET
+        else:
+            assert value not in yaml_value(name)
+
+    def test_list_remove_invalid_option(self, commands):
+        with pytest.raises(
+                cmdutils.CommandError,
+                match="No option 'nonexistent'"):
+            commands.config_list_remove('nonexistent', 'value')
+
+    def test_list_remove_non_list(self, commands):
+        with pytest.raises(
+                cmdutils.CommandError,
+                match=":config-list-remove can only be used for lists"):
+            commands.config_list_remove('content.javascript.enabled',
+                                        'never')
+
+    def test_list_remove_no_value(self, commands):
+        with pytest.raises(
+                cmdutils.CommandError,
+                match="never is not in colors.completion.fg!"):
+            commands.config_list_remove('colors.completion.fg', 'never')
+
+    @pytest.mark.parametrize('key', ['w', 'q'])
+    @pytest.mark.parametrize('temp', [True, False])
+    def test_dict_remove(self, commands, config_stub, yaml_value, key, temp):
+        name = 'aliases'
+        commands.config_dict_remove(name, key, temp=temp)
+
+        assert key not in config_stub.get(name)
+        if temp:
+            assert yaml_value(name) == usertypes.UNSET
+        else:
+            assert key not in yaml_value(name)
+
+    def test_dict_remove_invalid_option(self, commands):
+        with pytest.raises(
+                cmdutils.CommandError,
+                match="No option 'nonexistent'"):
+            commands.config_dict_remove('nonexistent', 'key')
+
+    def test_dict_remove_non_dict(self, commands):
+        with pytest.raises(
+                cmdutils.CommandError,
+                match=":config-dict-remove can only be used for dicts"):
+            commands.config_dict_remove('content.javascript.enabled',
+                                        'never')
+
+    def test_dict_remove_no_value(self, commands):
+        with pytest.raises(
+                cmdutils.CommandError,
+                match="never is not in aliases!"):
+            commands.config_dict_remove('aliases', 'never')
+
+
 class TestUnsetAndClear:
 
     """Test :config-unset and :config-clear."""
@@ -294,11 +454,45 @@ class TestUnsetAndClear:
         commands.config_unset(name, temp=temp)
 
         assert config_stub.get(name) == 'always'
-        assert yaml_value(name) == ('never' if temp else configutils.UNSET)
+        assert yaml_value(name) == ('never' if temp else usertypes.UNSET)
 
     def test_unset_unknown_option(self, commands):
-        with pytest.raises(cmdexc.CommandError, match="No option 'tabs'"):
+        with pytest.raises(cmdutils.CommandError, match="No option 'tabs'"):
             commands.config_unset('tabs')
+
+    def test_unset_uncustomized(self, commands):
+        with pytest.raises(cmdutils.CommandError, match="tabs.show is not customized"):
+            commands.config_unset('tabs.show')
+
+    @pytest.mark.parametrize('set_global', [True, False])
+    def test_unset_pattern(self, commands, config_stub, set_global):
+        name = 'content.javascript.enabled'
+        pattern = urlmatch.UrlPattern('*://example.com')
+        url = QUrl('https://example.com')
+
+        if set_global:
+            config_stub.set_obj(name, False)
+            global_value = False
+            local_value = True
+        else:
+            global_value = True
+            local_value = False
+
+        config_stub.set_obj(name, local_value, pattern=pattern)
+        commands.config_unset(name, pattern=str(pattern))
+        assert config_stub.get_obj(name, url=url) == global_value
+        assert config_stub.get_obj(name, url=url, fallback=False) == usertypes.UNSET
+
+    def test_unset_uncustomized_pattern(self, commands, config_stub):
+        name = 'content.javascript.enabled'
+        pattern = 'example.com'
+
+        config_stub.set_obj(name, False)
+        with pytest.raises(
+            cmdutils.CommandError,
+            match=f"{name} is not customized for {pattern}",
+        ):
+            commands.config_unset(name, pattern=pattern)
 
     @pytest.mark.parametrize('save', [True, False])
     def test_clear(self, commands, config_stub, yaml_value, save):
@@ -308,7 +502,7 @@ class TestUnsetAndClear:
         commands.config_clear(save=save)
 
         assert config_stub.get(name) == 'always'
-        assert yaml_value(name) == (configutils.UNSET if save else 'never')
+        assert yaml_value(name) == (usertypes.UNSET if save else 'never')
 
 
 class TestSource:
@@ -318,33 +512,50 @@ class TestSource:
     pytestmark = pytest.mark.usefixtures('config_tmpdir', 'data_tmpdir',
                                          'config_stub', 'key_config_stub')
 
-    @pytest.mark.parametrize('use_default_dir', [True, False])
+    @pytest.mark.parametrize('location', ['default', 'absolute', 'relative'])
     @pytest.mark.parametrize('clear', [True, False])
-    def test_config_source(self, tmpdir, commands, config_stub, config_tmpdir,
-                           use_default_dir, clear):
+    def test_config_source(self, tmp_path, commands, config_stub, config_tmpdir,
+                           location, clear):
         assert config_stub.val.content.javascript.enabled
         config_stub.val.search.ignore_case = 'always'
 
-        if use_default_dir:
+        if location == 'default':
             pyfile = config_tmpdir / 'config.py'
             arg = None
-        else:
-            pyfile = tmpdir / 'sourced.py'
+        elif location == 'absolute':
+            pyfile = tmp_path / 'sourced.py'
             arg = str(pyfile)
-        pyfile.write_text('c.content.javascript.enabled = False\n',
+        elif location == 'relative':
+            pyfile = config_tmpdir / 'sourced.py'
+            arg = 'sourced.py'
+        else:
+            assert False, location
+
+        pyfile.write_text('\n'.join(['config.load_autoconfig(False)',
+                                     'c.content.javascript.enabled = False']),
                           encoding='utf-8')
 
         commands.config_source(arg, clear=clear)
 
         assert not config_stub.val.content.javascript.enabled
         ignore_case = config_stub.val.search.ignore_case
-        assert ignore_case == ('smart' if clear else 'always')
+        assert ignore_case == (usertypes.IgnoreCase.smart if clear
+                               else usertypes.IgnoreCase.always)
+
+    def test_config_py_arg_source(self, commands, config_py_arg, config_stub):
+        assert config_stub.val.content.javascript.enabled
+        config_py_arg.write_text('\n'.join(['config.load_autoconfig(False)',
+                                            'c.content.javascript.enabled = False']),
+                                 encoding='utf-8')
+        commands.config_source()
+        assert not config_stub.val.content.javascript.enabled
 
     def test_errors(self, commands, config_tmpdir):
         pyfile = config_tmpdir / 'config.py'
-        pyfile.write_text('c.foo = 42', encoding='utf-8')
+        pyfile.write_text('\n'.join(['config.load_autoconfig(False)',
+                                     'c.foo = 42']), encoding='utf-8')
 
-        with pytest.raises(cmdexc.CommandError) as excinfo:
+        with pytest.raises(cmdutils.CommandError) as excinfo:
             commands.config_source()
 
         expected = ("Errors occurred while reading config.py:\n"
@@ -353,9 +564,10 @@ class TestSource:
 
     def test_invalid_source(self, commands, config_tmpdir):
         pyfile = config_tmpdir / 'config.py'
-        pyfile.write_text('1/0', encoding='utf-8')
+        pyfile.write_text('\n'.join(['config.load_autoconfig(False)',
+                                     '1/0']), encoding='utf-8')
 
-        with pytest.raises(cmdexc.CommandError) as excinfo:
+        with pytest.raises(cmdutils.CommandError) as excinfo:
             commands.config_source()
 
         expected = ("Errors occurred while reading config.py:\n"
@@ -395,16 +607,26 @@ class TestEdit:
 
     def test_with_sourcing(self, commands, config_stub, patch_editor):
         assert config_stub.val.content.javascript.enabled
-        mock = patch_editor('c.content.javascript.enabled = False')
+        mock = patch_editor('\n'.join(['config.load_autoconfig(False)',
+                                       'c.content.javascript.enabled = False']))
 
         commands.config_edit()
 
         mock.assert_called_once_with(unittest.mock.ANY)
         assert not config_stub.val.content.javascript.enabled
 
+    def test_config_py_with_sourcing(self, commands, config_stub, patch_editor, config_py_arg):
+        assert config_stub.val.content.javascript.enabled
+        conf = ['config.load_autoconfig(False)', 'c.content.javascript.enabled = False']
+        mock = patch_editor("\n".join(conf))
+        commands.config_edit()
+        mock.assert_called_once_with(unittest.mock.ANY)
+        assert not config_stub.val.content.javascript.enabled
+        assert config_py_arg.read_text('utf-8').splitlines() == conf
+
     def test_error(self, commands, config_stub, patch_editor, message_mock,
                    caplog):
-        patch_editor('c.foo = 42')
+        patch_editor('\n'.join(['config.load_autoconfig(False)', 'c.foo = 42']))
 
         with caplog.at_level(logging.ERROR):
             commands.config_edit()
@@ -419,8 +641,8 @@ class TestWritePy:
 
     """Tests for :config-write-py."""
 
-    def test_custom(self, commands, config_stub, key_config_stub, tmpdir):
-        confpy = tmpdir / 'config.py'
+    def test_custom(self, commands, config_stub, key_config_stub, tmp_path):
+        confpy = tmp_path / 'config.py'
         config_stub.val.content.javascript.enabled = True
         key_config_stub.bind(keyseq(',x'), 'message-info foo', mode='normal')
 
@@ -430,8 +652,8 @@ class TestWritePy:
         assert "c.content.javascript.enabled = True" in lines
         assert "config.bind(',x', 'message-info foo')" in lines
 
-    def test_defaults(self, commands, tmpdir):
-        confpy = tmpdir / 'config.py'
+    def test_defaults(self, commands, tmp_path):
+        confpy = tmp_path / 'config.py'
         commands.config_write_py(str(confpy), defaults=True)
 
         lines = confpy.read_text('utf-8').splitlines()
@@ -450,29 +672,48 @@ class TestWritePy:
         lines = confpy.read_text('utf-8').splitlines()
         assert '# Autogenerated config.py' in lines
 
-    def test_existing_file(self, commands, tmpdir):
-        confpy = tmpdir / 'config.py'
-        confpy.ensure()
+    @pytest.mark.posix
+    def test_expanduser(self, commands, monkeypatch, tmp_path):
+        """Make sure that using a path with ~/... works correctly."""
+        home = tmp_path / 'home'
+        home.mkdir()
+        monkeypatch.setenv('HOME', str(home))
 
-        with pytest.raises(cmdexc.CommandError) as excinfo:
+        commands.config_write_py('~/config.py')
+
+        confpy = home / 'config.py'
+        lines = confpy.read_text('utf-8').splitlines()
+        assert '# Autogenerated config.py' in lines
+
+    def test_existing_file(self, commands, tmp_path):
+        confpy = tmp_path / 'config.py'
+        confpy.touch()
+
+        with pytest.raises(cmdutils.CommandError) as excinfo:
             commands.config_write_py(str(confpy))
 
         expected = " already exists - use --force to overwrite!"
         assert str(excinfo.value).endswith(expected)
 
-    def test_existing_file_force(self, commands, tmpdir):
-        confpy = tmpdir / 'config.py'
-        confpy.ensure()
+    def test_existing_file_force(self, commands, tmp_path):
+        confpy = tmp_path / 'config.py'
+        confpy.touch()
 
         commands.config_write_py(str(confpy), force=True)
 
         lines = confpy.read_text('utf-8').splitlines()
         assert '# Autogenerated config.py' in lines
 
-    def test_oserror(self, commands, tmpdir):
+    def test_oserror(self, commands, tmp_path):
         """Test writing to a directory which does not exist."""
-        with pytest.raises(cmdexc.CommandError):
-            commands.config_write_py(str(tmpdir / 'foo' / 'config.py'))
+        with pytest.raises(cmdutils.CommandError):
+            commands.config_write_py(str(tmp_path / 'foo' / 'config.py'))
+
+    def test_config_py_arg(self, commands, config_py_arg):
+        config_py_arg.ensure()
+        commands.config_write_py(str(config_py_arg), force=True)
+        lines = config_py_arg.read_text('utf-8').splitlines()
+        assert '# Autogenerated config.py' in lines
 
 
 class TestBind:
@@ -492,7 +733,7 @@ class TestBind:
         config_stub.val.bindings.default = no_bindings
         config_stub.val.bindings.commands = no_bindings
         commands.bind(win_id=0)
-        assert tabbed_browser_stubs[0].opened_url == QUrl('qute://bindings')
+        assert tabbed_browser_stubs[0].loaded_url == QUrl('qute://bindings')
 
     @pytest.mark.parametrize('command', ['nop', 'nope'])
     def test_bind(self, commands, config_stub, no_bindings, key_config_stub,
@@ -581,7 +822,7 @@ class TestBind:
         elif command == 'unbind':
             func = commands.unbind
 
-        with pytest.raises(cmdexc.CommandError, match=expected):
+        with pytest.raises(cmdutils.CommandError, match=expected):
             func(*args, **kwargs)
 
     @pytest.mark.parametrize('key', ['a', 'b', '<Ctrl-X>'])

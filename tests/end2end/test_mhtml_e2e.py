@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2015-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2015-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,72 +15,57 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Test mhtml downloads based on sample files."""
 
-import os
-import os.path
+import pathlib
 import re
 import collections
 
 import pytest
 
-from qutebrowser.utils import qtutils
-
 
 def collect_tests():
-    basedir = os.path.dirname(__file__)
-    datadir = os.path.join(basedir, 'data', 'downloads', 'mhtml')
-    files = os.listdir(datadir)
+    basedir = pathlib.Path(__file__).parent
+    datadir = basedir / 'data' / 'downloads' / 'mhtml'
+    files = [x.name for x in datadir.iterdir()]
     return files
 
 
 def normalize_line(line):
     line = line.rstrip('\n')
-    line = re.sub('boundary="-+(=_qute|MultipartBoundary)-[0-9a-zA-Z-]+"',
+    line = re.sub('boundary="---=_qute-[0-9a-f-]+"',
                   'boundary="---=_qute-UUID"', line)
-    line = re.sub('^-+(=_qute|MultipartBoundary)-[0-9a-zA-Z-]+$',
+    line = re.sub('^-----+=_qute-[0-9a-f-]+$',
                   '-----=_qute-UUID', line)
     line = re.sub(r'localhost:\d{1,5}', 'localhost:(port)', line)
-    if line.startswith('Date: '):
-        line = 'Date: today'
-    if line.startswith('Content-ID: '):
-        line = 'Content-ID: 42'
 
     # Depending on Python's mimetypes module/the system's mime files, .js
     # files could be either identified as x-javascript or just javascript
     line = line.replace('Content-Type: application/x-javascript',
                         'Content-Type: application/javascript')
 
-    # Added with Qt 5.11
-    if (line.startswith('Snapshot-Content-Location: ') and
-            not qtutils.version_check('5.11', compiled=False)):
-        line = None
+    # With QtWebKit and newer Werkzeug versions, we also get an encoding
+    # specified.
+    line = line.replace('javascript; charset=utf-8', 'javascript')
 
     return line
-
-
-def normalize_whole(s):
-    if qtutils.version_check('5.12', compiled=False):
-        s = s.replace('\n\n-----=_qute-UUID', '\n-----=_qute-UUID')
-    return s
 
 
 class DownloadDir:
 
     """Abstraction over a download directory."""
 
-    def __init__(self, tmpdir):
-        self._tmpdir = tmpdir
-        self.location = str(tmpdir)
+    def __init__(self, tmp_path, config):
+        self._tmp_path = tmp_path
+        self._config = config
+        self.location = str(tmp_path)
 
     def read_file(self):
-        files = self._tmpdir.listdir()
+        files = list(self._tmp_path.iterdir())
         assert len(files) == 1
-
-        with open(str(files[0]), 'r', encoding='utf-8') as f:
-            return f.readlines()
+        return files[0].read_text(encoding='utf-8').splitlines()
 
     def sanity_check_mhtml(self):
         assert 'Content-Type: multipart/related' in '\n'.join(self.read_file())
@@ -92,18 +77,16 @@ class DownloadDir:
                                       if normalize_line(line) is not None)
         actual_data = '\n'.join(normalize_line(line)
                                 for line in self.read_file())
-        actual_data = normalize_whole(actual_data)
-
         assert actual_data == expected_data
 
 
 @pytest.fixture
-def download_dir(tmpdir):
-    return DownloadDir(tmpdir)
+def download_dir(tmp_path, pytestconfig):
+    return DownloadDir(tmp_path, pytestconfig)
 
 
 def _test_mhtml_requests(test_dir, test_path, server):
-    with open(os.path.join(test_dir, 'requests'), encoding='utf-8') as f:
+    with (test_dir / 'requests').open(encoding='utf-8') as f:
         expected_requests = []
         for line in f:
             if line.startswith('#'):
@@ -124,18 +107,18 @@ def test_mhtml(request, test_name, download_dir, quteproc, server):
     quteproc.set_setting('downloads.location.directory', download_dir.location)
     quteproc.set_setting('downloads.location.prompt', 'false')
 
-    test_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)),
-                            'data', 'downloads', 'mhtml', test_name)
+    test_dir = (pathlib.Path(__file__).parent.resolve()
+                / 'data' / 'downloads' / 'mhtml' / test_name)
     test_path = 'data/downloads/mhtml/{}'.format(test_name)
 
     url_path = '{}/{}.html'.format(test_path, test_name)
     quteproc.open_path(url_path)
 
-    download_dest = os.path.join(download_dir.location,
-                                 '{}-downloaded.mht'.format(test_name))
+    download_dest = (pathlib.Path(download_dir.location)
+                     / '{}-downloaded.mht'.format(test_name))
 
     # Wait for favicon.ico to be loaded if there is one
-    if os.path.exists(os.path.join(test_dir, 'favicon.png')):
+    if (test_dir / 'favicon.png').exists():
         server.wait_for(path='/{}/favicon.png'.format(test_path))
 
     # Discard all requests that were necessary to display the page
@@ -144,13 +127,12 @@ def test_mhtml(request, test_name, download_dir, quteproc, server):
     quteproc.wait_for(category='downloads',
                       message='File successfully written.')
 
-    suffix = '-webengine' if request.config.webengine else ''
-    filename = '{}{}.mht'.format(test_name, suffix)
-    expected_file = os.path.join(test_dir, filename)
-    if os.path.exists(expected_file):
-        download_dir.compare_mhtml(expected_file)
-    else:
+    if request.config.webengine:
         download_dir.sanity_check_mhtml()
+        return
 
-    if not request.config.webengine:
-        _test_mhtml_requests(test_dir, test_path, server)
+    filename = test_name + '.mht'
+    expected_file = test_dir / filename
+
+    download_dir.compare_mhtml(expected_file)
+    _test_mhtml_requests(test_dir, test_path, server)

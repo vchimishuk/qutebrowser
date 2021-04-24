@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2015-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2015-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Tests for qutebrowser.commands.argparser."""
 
@@ -28,7 +28,10 @@ from PyQt5.QtCore import QUrl
 from qutebrowser.commands import argparser, cmdexc
 
 
-Enum = enum.Enum('Enum', ['foo', 'foo_bar'])
+class Enum(enum.Enum):
+
+    foo = enum.auto()
+    foo_bar = enum.auto()
 
 
 class TestArgumentParser:
@@ -60,7 +63,7 @@ class TestArgumentParser:
             parser.parse_args(['--help'])
 
         expected_url = QUrl('qute://help/commands.html#foo')
-        assert tabbed_browser_stubs[1].opened_url == expected_url
+        assert tabbed_browser_stubs[1].loaded_url == expected_url
 
 
 @pytest.mark.parametrize('types, value, expected', [

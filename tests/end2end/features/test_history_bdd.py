@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2016-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2016-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 import json
 import logging
@@ -30,8 +30,8 @@ bdd.scenarios('history.feature')
 @pytest.fixture(autouse=True)
 def turn_on_sql_history(quteproc):
     """Make sure SQL writing is enabled for tests in this module."""
-    quteproc.send_cmd(":debug-pyeval objreg.get('args')."
-                      "debug_flags.remove('no-sql-history')")
+    cmd = ":debug-pyeval objects.debug_flags.remove('no-sql-history')"
+    quteproc.send_cmd(cmd)
     quteproc.wait_for_load_finished_url('qute://pyeval')
 
 

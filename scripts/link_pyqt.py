@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 
 # This file is part of qutebrowser.
 #
@@ -16,7 +16,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Symlink PyQt into a given virtualenv."""
 
@@ -33,8 +33,6 @@ import filecmp
 class Error(Exception):
 
     """Exception raised when linking fails."""
-
-    pass
 
 
 def run_py(executable, *code):
@@ -123,8 +121,7 @@ def get_lib_path(executable, name, required=True):
         if required:
             raise Error("Could not import {} with {}: {}!".format(
                 name, executable, data))
-        else:
-            return None
+        return None
     else:
         raise ValueError("Unexpected output: {!r}".format(output))
 
@@ -202,7 +199,9 @@ def get_tox_syspython(tox_path):
     with open(path, encoding='ascii') as f:
         line = f.readline()
     _md5, sys_python = line.rstrip().split(' ', 1)
-    return sys_python
+    # Follow symlinks to get the system-wide interpreter if we have a tox isolated
+    # build.
+    return os.path.realpath(sys_python)
 
 
 def main():

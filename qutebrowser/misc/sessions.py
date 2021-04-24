@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2015-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2015-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Management of sessions - saved tabs/windows."""
 
@@ -23,21 +23,35 @@ import os
 import os.path
 import itertools
 import urllib
+import shutil
+import pathlib
+from typing import Any, Iterable, MutableMapping, MutableSequence, Optional, Union, cast
 
-from PyQt5.QtCore import QUrl, QObject, QPoint, QTimer
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import Qt, QUrl, QObject, QPoint, QTimer, QDateTime
 import yaml
 
 from qutebrowser.utils import (standarddir, objreg, qtutils, log, message,
-                               utils)
-from qutebrowser.commands import cmdexc, cmdutils
+                               utils, usertypes, version)
+from qutebrowser.api import cmdutils
 from qutebrowser.config import config, configfiles
 from qutebrowser.completion.models import miscmodels
 from qutebrowser.mainwindow import mainwindow
 from qutebrowser.qt import sip
+from qutebrowser.misc import objects, throttle
 
 
-default = object()  # Sentinel value
+_JsonType = MutableMapping[str, Any]
+
+
+class Sentinel:
+
+    """Sentinel value for default argument."""
+
+
+default = Sentinel()
+session_manager = cast('SessionManager', None)
+
+ArgType = Union[str, Sentinel]
 
 
 def init(parent=None):
@@ -46,14 +60,44 @@ def init(parent=None):
     Args:
         parent: The parent to use for the SessionManager.
     """
-    base_path = os.path.join(standarddir.data(), 'sessions')
-    try:
-        os.mkdir(base_path)
-    except FileExistsError:
-        pass
+    base_path = pathlib.Path(standarddir.data()) / 'sessions'
 
-    session_manager = SessionManager(base_path, parent)
-    objreg.register('session-manager', session_manager)
+    # WORKAROUND for https://github.com/qutebrowser/qutebrowser/issues/5359
+    backup_path = base_path / 'before-qt-515'
+
+    if objects.backend == usertypes.Backend.QtWebEngine:
+        webengine_version = version.qtwebengine_versions().webengine
+        do_backup = webengine_version >= utils.VersionNumber(5, 15)
+    else:
+        do_backup = False
+
+    if base_path.exists() and not backup_path.exists() and do_backup:
+        backup_path.mkdir()
+        for path in base_path.glob('*.yml'):
+            shutil.copy(path, backup_path)
+
+    base_path.mkdir(exist_ok=True)
+
+    global session_manager
+    session_manager = SessionManager(str(base_path), parent)
+
+
+def shutdown(session: Optional[ArgType], last_window: bool) -> None:
+    """Handle a shutdown by saving sessions and removing the autosave file."""
+    if session_manager is None:
+        return  # type: ignore[unreachable]
+
+    try:
+        if session is not None:
+            session_manager.save(session, last_window=last_window,
+                                 load_next_time=True)
+        elif config.val.auto_save.session:
+            session_manager.save(default, last_window=last_window,
+                                 load_next_time=True)
+    except SessionError as e:
+        log.sessions.error("Failed to save session: {}".format(e))
+
+    session_manager.delete_autosave()
 
 
 class SessionError(Exception):
@@ -79,7 +123,7 @@ class TabHistoryItem:
     """
 
     def __init__(self, url, title, *, original_url=None, active=False,
-                 user_data=None):
+                 user_data=None, last_visited=None):
         self.url = url
         if original_url is None:
             self.original_url = url
@@ -88,11 +132,13 @@ class TabHistoryItem:
         self.title = title
         self.active = active
         self.user_data = user_data
+        self.last_visited = last_visited
 
     def __repr__(self):
         return utils.get_repr(self, constructor=True, url=self.url,
                               original_url=self.original_url, title=self.title,
-                              active=self.active, user_data=self.user_data)
+                              active=self.active, user_data=self.user_data,
+                              last_visited=self.last_visited)
 
 
 class SessionManager(QObject):
@@ -103,16 +149,18 @@ class SessionManager(QObject):
         _base_path: The path to store sessions under.
         _last_window_session: The session data of the last window which was
                               closed.
-        _current: The name of the currently loaded session, or None.
+        current: The name of the currently loaded session, or None.
         did_load: Set when a session was loaded.
     """
 
     def __init__(self, base_path, parent=None):
         super().__init__(parent)
-        self._current = None
+        self.current: Optional[str] = None
         self._base_path = base_path
         self._last_window_session = None
         self.did_load = False
+        # throttle autosaves to one minute apart
+        self.save_autosave = throttle.Throttle(self._save_autosave, 60 * 1000)
 
     def _get_session_path(self, name, check_exists=False):
         """Get the session path based on a session name or absolute path.
@@ -130,8 +178,7 @@ class SessionManager(QObject):
             path = os.path.join(self._base_path, name + '.yml')
             if check_exists and not os.path.exists(path):
                 raise SessionNotFoundError(path)
-            else:
-                return path
+            return path
 
     def exists(self, name):
         """Check if a named session exists."""
@@ -153,7 +200,7 @@ class SessionManager(QObject):
         Return:
             A dict with the saved data for this item.
         """
-        data = {
+        data: _JsonType = {
             'url': bytes(item.url().toEncoded()).decode('ascii'),
         }
 
@@ -179,6 +226,8 @@ class SessionManager(QObject):
             # QtWebEngine
             user_data = None
 
+        data['last_visited'] = item.lastVisited().toString(Qt.ISODate)
+
         if tab.history.current_idx() == idx:
             pos = tab.scroller.pos_px()
             data['zoom'] = tab.zoom.factor()
@@ -201,7 +250,7 @@ class SessionManager(QObject):
             tab: The WebView to save.
             active: Whether the tab is currently active.
         """
-        data = {'history': []}
+        data: _JsonType = {'history': []}
         if active:
             data['active'] = True
         for idx, item in enumerate(tab.history):
@@ -218,9 +267,9 @@ class SessionManager(QObject):
 
     def _save_all(self, *, only_window=None, with_private=False):
         """Get a dict with data for all windows/tabs."""
-        data = {'windows': []}
+        data: _JsonType = {'windows': []}
         if only_window is not None:
-            winlist = [only_window]
+            winlist: Iterable[int] = [only_window]
         else:
             winlist = objreg.window_registry
 
@@ -234,16 +283,16 @@ class SessionManager(QObject):
             if sip.isdeleted(main_window):
                 continue
 
-            if tabbed_browser.private and not with_private:
+            if tabbed_browser.is_private and not with_private:
                 continue
 
-            win_data = {}
-            active_window = QApplication.instance().activeWindow()
+            win_data: _JsonType = {}
+            active_window = objects.qapp.activeWindow()
             if getattr(active_window, 'win_id', None) == win_id:
                 win_data['active'] = True
             win_data['geometry'] = bytes(main_window.saveGeometry())
             win_data['tabs'] = []
-            if tabbed_browser.private:
+            if tabbed_browser.is_private:
                 win_data['private'] = True
             for i, tab in enumerate(tabbed_browser.widgets()):
                 active = i == tabbed_browser.widget.currentIndex()
@@ -261,8 +310,8 @@ class SessionManager(QObject):
         if name is default:
             name = config.val.session.default_name
             if name is None:
-                if self._current is not None:
-                    name = self._current
+                if self.current is not None:
+                    name = self.current
                 else:
                     name = 'default'
         return name
@@ -295,7 +344,8 @@ class SessionManager(QObject):
         else:
             data = self._save_all(only_window=only_window,
                                   with_private=with_private)
-        log.sessions.vdebug("Saving data: {}".format(data))
+        log.sessions.vdebug(  # type: ignore[attr-defined]
+            "Saving data: {}".format(data))
         try:
             with qtutils.savefile_open(path) as f:
                 utils.yaml_dump(data, f)
@@ -306,7 +356,7 @@ class SessionManager(QObject):
             configfiles.state['general']['session'] = name
         return name
 
-    def save_autosave(self):
+    def _save_autosave(self):
         """Save the autosave session."""
         try:
             self.save('_autosave')
@@ -315,6 +365,8 @@ class SessionManager(QObject):
 
     def delete_autosave(self):
         """Delete the autosave session."""
+        # cancel any in-flight saves
+        self.save_autosave.cancel()
         try:
             self.delete('_autosave')
         except SessionNotFoundError:
@@ -328,10 +380,10 @@ class SessionManager(QObject):
         """Temporarily save the session for the last closed window."""
         self._last_window_session = self._save_all()
 
-    def _load_tab(self, new_tab, data):
+    def _load_tab(self, new_tab, data):  # noqa: C901
         """Load yaml data into a newly opened tab."""
         entries = []
-        lazy_load = []
+        lazy_load: MutableSequence[_JsonType] = []
         # use len(data['history'])
         # -> dropwhile empty if not session.lazy_session
         lazy_index = len(data['history'])
@@ -382,22 +434,53 @@ class SessionManager(QObject):
 
             active = histentry.get('active', False)
             url = QUrl.fromEncoded(histentry['url'].encode('ascii'))
+
             if 'original-url' in histentry:
                 orig_url = QUrl.fromEncoded(
                     histentry['original-url'].encode('ascii'))
             else:
                 orig_url = url
+
+            if histentry.get("last_visited"):
+                last_visited: Optional[QDateTime] = QDateTime.fromString(
+                    histentry.get("last_visited"),
+                    Qt.ISODate,
+                )
+            else:
+                last_visited = None
+
             entry = TabHistoryItem(url=url, original_url=orig_url,
                                    title=histentry['title'], active=active,
-                                   user_data=user_data)
+                                   user_data=user_data,
+                                   last_visited=last_visited)
             entries.append(entry)
             if active:
                 new_tab.title_changed.emit(histentry['title'])
 
         try:
-            new_tab.history.load_items(entries)
+            new_tab.history.private_api.load_items(entries)
         except ValueError as e:
             raise SessionError(e)
+
+    def _load_window(self, win):
+        """Turn yaml data into windows."""
+        window = mainwindow.MainWindow(geometry=win['geometry'],
+                                       private=win.get('private', None))
+        window.show()
+        tabbed_browser = objreg.get('tabbed-browser', scope='window',
+                                    window=window.win_id)
+        tab_to_focus = None
+        for i, tab in enumerate(win['tabs']):
+            new_tab = tabbed_browser.tabopen(background=False)
+            self._load_tab(new_tab, tab)
+            if tab.get('active', False):
+                tab_to_focus = i
+            if new_tab.data.pinned:
+                new_tab.set_pinned(True)
+        if tab_to_focus is not None:
+            tabbed_browser.widget.setCurrentIndex(tab_to_focus)
+        if win.get('active', False):
+            QTimer.singleShot(0, tabbed_browser.widget.activateWindow)
 
     def load(self, name, temp=False):
         """Load a named session.
@@ -417,30 +500,18 @@ class SessionManager(QObject):
         if data is None:
             raise SessionError("Got empty session file")
 
+        if qtutils.is_single_process():
+            if any(win.get('private') for win in data['windows']):
+                raise SessionError("Can't load a session with private windows "
+                                   "in single process mode.")
+
         for win in data['windows']:
-            window = mainwindow.MainWindow(geometry=win['geometry'],
-                                           private=win.get('private', None))
-            window.show()
-            tabbed_browser = objreg.get('tabbed-browser', scope='window',
-                                        window=window.win_id)
-            tab_to_focus = None
-            for i, tab in enumerate(win['tabs']):
-                new_tab = tabbed_browser.tabopen(background=False)
-                self._load_tab(new_tab, tab)
-                if tab.get('active', False):
-                    tab_to_focus = i
-                if new_tab.data.pinned:
-                    tabbed_browser.widget.set_tab_pinned(new_tab,
-                                                         new_tab.data.pinned)
-            if tab_to_focus is not None:
-                tabbed_browser.widget.setCurrentIndex(tab_to_focus)
-            if win.get('active', False):
-                QTimer.singleShot(0, tabbed_browser.widget.activateWindow)
+            self._load_window(win)
 
         if data['windows']:
             self.did_load = True
         if not name.startswith('_') and not temp:
-            self._current = name
+            self.current = name
 
     def delete(self, name):
         """Delete a session."""
@@ -459,108 +530,144 @@ class SessionManager(QObject):
                 sessions.append(base)
         return sorted(sessions)
 
-    @cmdutils.register(instance='session-manager')
-    @cmdutils.argument('name', completion=miscmodels.session)
-    def session_load(self, name, clear=False, temp=False, force=False,
-                     delete=False):
-        """Load a session.
 
-        Args:
-            name: The name of the session.
-            clear: Close all existing windows.
-            temp: Don't set the current session for :session-save.
-            force: Force loading internal sessions (starting with an
-                   underline).
-            delete: Delete the saved session once it has loaded.
-        """
-        if name.startswith('_') and not force:
-            raise cmdexc.CommandError("{} is an internal session, use --force "
-                                      "to load anyways.".format(name))
-        old_windows = list(objreg.window_registry.values())
-        try:
-            self.load(name, temp=temp)
-        except SessionNotFoundError:
-            raise cmdexc.CommandError("Session {} not found!".format(name))
-        except SessionError as e:
-            raise cmdexc.CommandError("Error while loading session: {}"
-                                      .format(e))
-        else:
-            if clear:
-                for win in old_windows:
-                    win.close()
-            if delete:
-                try:
-                    self.delete(name)
-                except SessionError as e:
-                    log.sessions.exception("Error while deleting session!")
-                    raise cmdexc.CommandError(
-                        "Error while deleting session: {}"
-                        .format(e))
-                else:
-                    log.sessions.debug(
-                        "Loaded & deleted session {}.".format(name))
+@cmdutils.register()
+@cmdutils.argument('name', completion=miscmodels.session)
+def session_load(name: str, *,
+                 clear: bool = False,
+                 temp: bool = False,
+                 force: bool = False,
+                 delete: bool = False) -> None:
+    """Load a session.
 
-    @cmdutils.register(instance='session-manager')
-    @cmdutils.argument('name', completion=miscmodels.session)
-    @cmdutils.argument('win_id', win_id=True)
-    @cmdutils.argument('with_private', flag='p')
-    def session_save(self, name: str = default, current=False, quiet=False,
-                     force=False, only_active_window=False, with_private=False,
-                     win_id=None):
-        """Save a session.
-
-        Args:
-            name: The name of the session. If not given, the session configured
-                  in session.default_name is saved.
-            current: Save the current session instead of the default.
-            quiet: Don't show confirmation message.
-            force: Force saving internal sessions (starting with an underline).
-            only_active_window: Saves only tabs of the currently active window.
-            with_private: Include private windows.
-        """
-        if name is not default and name.startswith('_') and not force:
-            raise cmdexc.CommandError("{} is an internal session, use --force "
-                                      "to save anyways.".format(name))
-        if current:
-            if self._current is None:
-                raise cmdexc.CommandError("No session loaded currently!")
-            name = self._current
-            assert not name.startswith('_')
-        try:
-            if only_active_window:
-                name = self.save(name, only_window=win_id,
-                                 with_private=True)
+    Args:
+        name: The name of the session.
+        clear: Close all existing windows.
+        temp: Don't set the current session for :session-save.
+        force: Force loading internal sessions (starting with an underline).
+        delete: Delete the saved session once it has loaded.
+    """
+    if name.startswith('_') and not force:
+        raise cmdutils.CommandError("{} is an internal session, use --force "
+                                    "to load anyways.".format(name))
+    old_windows = list(objreg.window_registry.values())
+    try:
+        session_manager.load(name, temp=temp)
+    except SessionNotFoundError:
+        raise cmdutils.CommandError("Session {} not found!".format(name))
+    except SessionError as e:
+        raise cmdutils.CommandError("Error while loading session: {}"
+                                    .format(e))
+    else:
+        if clear:
+            for win in old_windows:
+                win.close()
+        if delete:
+            try:
+                session_manager.delete(name)
+            except SessionError as e:
+                log.sessions.exception("Error while deleting session!")
+                raise cmdutils.CommandError("Error while deleting session: {}"
+                                            .format(e))
             else:
-                name = self.save(name, with_private=with_private)
-        except SessionError as e:
-            raise cmdexc.CommandError("Error while saving session: {}"
-                                      .format(e))
+                log.sessions.debug("Loaded & deleted session {}.".format(name))
+
+
+@cmdutils.register()
+@cmdutils.argument('name', completion=miscmodels.session)
+@cmdutils.argument('win_id', value=cmdutils.Value.win_id)
+@cmdutils.argument('with_private', flag='p')
+def session_save(name: ArgType = default, *,
+                 current: bool = False,
+                 quiet: bool = False,
+                 force: bool = False,
+                 only_active_window: bool = False,
+                 with_private: bool = False,
+                 win_id: int = None) -> None:
+    """Save a session.
+
+    Args:
+        name: The name of the session. If not given, the session configured in
+              session.default_name is saved.
+        current: Save the current session instead of the default.
+        quiet: Don't show confirmation message.
+        force: Force saving internal sessions (starting with an underline).
+        only_active_window: Saves only tabs of the currently active window.
+        with_private: Include private windows.
+    """
+    if not isinstance(name, Sentinel) and name.startswith('_') and not force:
+        raise cmdutils.CommandError("{} is an internal session, use --force "
+                                    "to save anyways.".format(name))
+    if current:
+        if session_manager.current is None:
+            raise cmdutils.CommandError("No session loaded currently!")
+        name = session_manager.current
+        assert not name.startswith('_')
+    try:
+        if only_active_window:
+            name = session_manager.save(name, only_window=win_id,
+                                        with_private=True)
         else:
-            if quiet:
-                log.sessions.debug("Saved session {}.".format(name))
-            else:
-                message.info("Saved session {}.".format(name))
+            name = session_manager.save(name, with_private=with_private)
+    except SessionError as e:
+        raise cmdutils.CommandError("Error while saving session: {}".format(e))
+    else:
+        if quiet:
+            log.sessions.debug("Saved session {}.".format(name))
+        else:
+            message.info("Saved session {}.".format(name))
 
-    @cmdutils.register(instance='session-manager')
-    @cmdutils.argument('name', completion=miscmodels.session)
-    def session_delete(self, name, force=False):
-        """Delete a session.
 
-        Args:
-            name: The name of the session.
-            force: Force deleting internal sessions (starting with an
-                   underline).
-        """
-        if name.startswith('_') and not force:
-            raise cmdexc.CommandError("{} is an internal session, use --force "
-                                      "to delete anyways.".format(name))
+@cmdutils.register()
+@cmdutils.argument('name', completion=miscmodels.session)
+def session_delete(name: str, *, force: bool = False) -> None:
+    """Delete a session.
+
+    Args:
+        name: The name of the session.
+        force: Force deleting internal sessions (starting with an underline).
+    """
+    if name.startswith('_') and not force:
+        raise cmdutils.CommandError("{} is an internal session, use --force "
+                                    "to delete anyways.".format(name))
+    try:
+        session_manager.delete(name)
+    except SessionNotFoundError:
+        raise cmdutils.CommandError("Session {} not found!".format(name))
+    except SessionError as e:
+        log.sessions.exception("Error while deleting session!")
+        raise cmdutils.CommandError("Error while deleting session: {}"
+                                    .format(e))
+    else:
+        log.sessions.debug("Deleted session {}.".format(name))
+
+
+def load_default(name):
+    """Load the default session.
+
+    Args:
+        name: The name of the session to load, or None to read state file.
+    """
+    if name is None and session_manager.exists('_autosave'):
+        name = '_autosave'
+    elif name is None:
         try:
-            self.delete(name)
-        except SessionNotFoundError:
-            raise cmdexc.CommandError("Session {} not found!".format(name))
-        except SessionError as e:
-            log.sessions.exception("Error while deleting session!")
-            raise cmdexc.CommandError("Error while deleting session: {}"
-                                      .format(e))
-        else:
-            log.sessions.debug("Deleted session {}.".format(name))
+            name = configfiles.state['general']['session']
+        except KeyError:
+            # No session given as argument and none in the session file ->
+            # start without loading a session
+            return
+
+    try:
+        session_manager.load(name)
+    except SessionNotFoundError:
+        message.error("Session {} not found!".format(name))
+    except SessionError as e:
+        message.error("Failed to load session {}: {}".format(name, e))
+    try:
+        del configfiles.state['general']['session']
+    except KeyError:
+        pass
+    # If this was a _restart session, delete it.
+    if name == '_restart':
+        session_manager.delete('_restart')

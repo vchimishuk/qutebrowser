@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2017-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2017-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,28 +15,29 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Initialization of the configuration."""
 
+import argparse
 import os.path
 import sys
 
 from PyQt5.QtWidgets import QMessageBox
 
+from qutebrowser.api import config as configapi
 from qutebrowser.config import (config, configdata, configfiles, configtypes,
-                                configexc, configcommands)
-from qutebrowser.utils import (objreg, usertypes, log, standarddir, message,
-                               qtutils)
+                                configexc, configcommands, stylesheet, qtargs)
+from qutebrowser.utils import objreg, usertypes, log, standarddir, message
 from qutebrowser.config import configcache
-from qutebrowser.misc import msgbox, objects
+from qutebrowser.misc import msgbox, objects, savemanager
 
 
 # Error which happened during init, so we can show a message box.
 _init_errors = None
 
 
-def early_init(args):
+def early_init(args: argparse.Namespace) -> None:
     """Initialize the part of the config which works without a QApplication."""
     configdata.init()
 
@@ -44,6 +45,7 @@ def early_init(args):
 
     config.instance = config.Config(yaml_config=yaml_config)
     config.val = config.ConfigContainer(config.instance)
+    configapi.val = config.ConfigContainer(config.instance)
     config.key_instance = config.KeyConfig(config.instance)
     config.cache = configcache.ConfigCache()
     yaml_config.setParent(config.instance)
@@ -53,21 +55,31 @@ def early_init(args):
 
     config_commands = configcommands.ConfigCommands(
         config.instance, config.key_instance)
-    objreg.register('config-commands', config_commands)
+    objreg.register('config-commands', config_commands, command_only=True)
 
-    config_file = os.path.join(standarddir.config(), 'config.py')
+    config_file = standarddir.config_py()
+    custom_config_py = args.config_py is not None
+
+    global _init_errors
 
     try:
-        if os.path.exists(config_file):
-            configfiles.read_config_py(config_file)
+        if os.path.exists(config_file) or custom_config_py:
+            # If we have a custom --config-py flag, we want it to be fatal if it doesn't
+            # exist, so we don't silently fall back to autoconfig.yml in that case.
+            configfiles.read_config_py(
+                config_file,
+                warn_autoconfig=not custom_config_py,
+            )
         else:
             configfiles.read_autoconfig()
     except configexc.ConfigFileErrors as e:
-        log.config.exception("Error while loading {}".format(e.basename))
-        global _init_errors
+        log.config.error("Error while loading {}".format(e.basename))
         _init_errors = e
 
-    configfiles.init()
+    try:
+        configfiles.init()
+    except configexc.ConfigFileErrors as e:
+        _init_errors = e
 
     for opt, val in args.temp_settings:
         try:
@@ -76,52 +88,34 @@ def early_init(args):
             message.error("set: {} - {}".format(e.__class__.__name__, e))
 
     objects.backend = get_backend(args)
+    objects.debug_flags = set(args.debug_flags)
 
-    configtypes.Font.monospace_fonts = config.val.fonts.monospace
-    config.instance.changed.connect(_update_monospace_fonts)
+    stylesheet.init()
 
-    _init_envvars()
-
-
-def _init_envvars():
-    """Initialize environment variables which need to be set early."""
-    if objects.backend == usertypes.Backend.QtWebEngine:
-        software_rendering = config.val.qt.force_software_rendering
-        if software_rendering == 'software-opengl':
-            os.environ['QT_XCB_FORCE_SOFTWARE_OPENGL'] = '1'
-        elif software_rendering == 'qt-quick':
-            os.environ['QT_QUICK_BACKEND'] = 'software'
-        elif software_rendering == 'chromium':
-            os.environ['QT_WEBENGINE_DISABLE_NOUVEAU_WORKAROUND'] = '1'
-
-    if config.val.qt.force_platform is not None:
-        os.environ['QT_QPA_PLATFORM'] = config.val.qt.force_platform
-
-    if config.val.window.hide_decoration:
-        os.environ['QT_WAYLAND_DISABLE_WINDOWDECORATION'] = '1'
-
-    if config.val.qt.highdpi:
-        os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
+    qtargs.init_envvars()
 
 
-@config.change_filter('fonts.monospace', function=True)
-def _update_monospace_fonts():
-    """Update all fonts if fonts.monospace was set."""
-    configtypes.Font.monospace_fonts = config.val.fonts.monospace
+def _update_font_defaults(setting: str) -> None:
+    """Update all fonts if fonts.default_family/_size was set."""
+    if setting not in {'fonts.default_family', 'fonts.default_size'}:
+        return
+
+    configtypes.FontBase.set_defaults(config.val.fonts.default_family,
+                                      config.val.fonts.default_size)
+
     for name, opt in configdata.DATA.items():
-        if name == 'fonts.monospace':
-            continue
-        elif not isinstance(opt.typ, configtypes.Font):
+        if not isinstance(opt.typ, configtypes.FontBase):
             continue
 
         value = config.instance.get_obj(name)
-        if value is None or not value.endswith(' monospace'):
+        if value is None or not (value.endswith(' default_family') or
+                                 'default_size ' in value):
             continue
 
         config.instance.changed.emit(name)
 
 
-def get_backend(args):
+def get_backend(args: argparse.Namespace) -> usertypes.Backend:
     """Find out what backend to use based on available libraries."""
     str_to_backend = {
         'webkit': usertypes.Backend.QtWebKit,
@@ -134,7 +128,7 @@ def get_backend(args):
         return str_to_backend[config.val.backend]
 
 
-def late_init(save_manager):
+def late_init(save_manager: savemanager.SaveManager) -> None:
     """Initialize the rest of the config after the QApplication is created."""
     global _init_errors
     if _init_errors is not None:
@@ -143,95 +137,16 @@ def late_init(save_manager):
                                text=_init_errors.to_html(),
                                icon=QMessageBox.Warning,
                                plain_text=False)
-        errbox.exec_()
+        errbox.exec()
+
+        if _init_errors.fatal:
+            sys.exit(usertypes.Exit.err_init)
+
     _init_errors = None
+
+    configtypes.FontBase.set_defaults(config.val.fonts.default_family,
+                                      config.val.fonts.default_size)
+    config.instance.changed.connect(_update_font_defaults)
 
     config.instance.init_save_manager(save_manager)
     configfiles.state.init_save_manager(save_manager)
-
-
-def qt_args(namespace):
-    """Get the Qt QApplication arguments based on an argparse namespace.
-
-    Args:
-        namespace: The argparse namespace.
-
-    Return:
-        The argv list to be passed to Qt.
-    """
-    argv = [sys.argv[0]]
-
-    if namespace.qt_flag is not None:
-        argv += ['--' + flag[0] for flag in namespace.qt_flag]
-
-    if namespace.qt_arg is not None:
-        for name, value in namespace.qt_arg:
-            argv += ['--' + name, value]
-
-    argv += ['--' + arg for arg in config.val.qt.args]
-
-    if objects.backend == usertypes.Backend.QtWebEngine:
-        argv += list(_qtwebengine_args())
-
-    return argv
-
-
-def _qtwebengine_args():
-    """Get the QtWebEngine arguments to use based on the config."""
-    if not qtutils.version_check('5.11', compiled=False):
-        # WORKAROUND equivalent to
-        # https://codereview.qt-project.org/#/c/217932/
-        # Needed for Qt < 5.9.5 and < 5.10.1
-        yield '--disable-shared-workers'
-
-    settings = {
-        'qt.force_software_rendering': {
-            'software-opengl': None,
-            'qt-quick': None,
-            'chromium': '--disable-gpu',
-            'none': None,
-        },
-        'content.canvas_reading': {
-            True: None,
-            False: '--disable-reading-from-canvas',
-        },
-        'content.webrtc_ip_handling_policy': {
-            'all-interfaces': None,
-            'default-public-and-private-interfaces':
-                '--force-webrtc-ip-handling-policy='
-                'default_public_and_private_interfaces',
-            'default-public-interface-only':
-                '--force-webrtc-ip-handling-policy='
-                'default_public_interface_only',
-            'disable-non-proxied-udp':
-                '--force-webrtc-ip-handling-policy='
-                'disable_non_proxied_udp',
-        },
-        'qt.process_model': {
-            'process-per-site-instance': None,
-            'process-per-site': '--process-per-site',
-            'single-process': '--single-process',
-        },
-        'qt.low_end_device_mode': {
-            'auto': None,
-            'always': '--enable-low-end-device-mode',
-            'never': '--disable-low-end-device-mode',
-        },
-        'content.headers.referer': {
-            'always': None,
-            'never': '--no-referrers',
-            'same-domain': '--reduced-referrer-granularity',
-        }
-    }
-
-    if not qtutils.version_check('5.11'):
-        # On Qt 5.11, we can control this via QWebEngineSettings
-        settings['content.autoplay'] = {
-            True: None,
-            False: '--autoplay-policy=user-gesture-required',
-        }
-
-    for setting, args in sorted(settings.items()):
-        arg = args[config.instance.get(setting)]
-        if arg is not None:
-            yield arg

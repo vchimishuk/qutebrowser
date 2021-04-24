@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 
 # This file is part of qutebrowser.
 #
@@ -16,7 +16,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Generate asciidoc source for qutebrowser based on docstrings."""
 
@@ -35,9 +35,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir,
 # We import qutebrowser.app so all @cmdutils-register decorators are run.
 import qutebrowser.app
 from qutebrowser import qutebrowser, commands
-from qutebrowser.commands import cmdutils, argparser
+from qutebrowser.extensions import loader
+from qutebrowser.commands import argparser
 from qutebrowser.config import configdata, configtypes
 from qutebrowser.utils import docutils, usertypes
+from qutebrowser.misc import objects
 from scripts import asciidoc2html, utils
 
 FILE_HEADER = """
@@ -57,6 +59,11 @@ class UsageFormatter(argparse.HelpFormatter):
     argparse.HelpFormatter while copying 99% of the code :-/
     """
 
+    def __init__(self, prog, indent_increment=2, max_help_position=24,
+                 width=200):
+        """Override __init__ to set a fixed width as default."""
+        super().__init__(prog, indent_increment, max_help_position, width)
+
     def _format_usage(self, usage, actions, groups, _prefix):
         """Override _format_usage to not add the 'usage:' prefix."""
         return super()._format_usage(usage, actions, groups, '')
@@ -72,7 +79,7 @@ class UsageFormatter(argparse.HelpFormatter):
     def _metavar_formatter(self, action, default_metavar):
         """Override _metavar_formatter to add asciidoc markup to metavars.
 
-        Most code here is copied from Python 3.4's argparse.py.
+        Most code here is copied from Python 3.10's argparse.py.
         """
         if action.metavar is not None:
             result = "'{}'".format(action.metavar)
@@ -108,6 +115,19 @@ class UsageFormatter(argparse.HelpFormatter):
             action.option_strings = old_option_strings[action]
         return ret
 
+    def _format_args(self, action, default_metavar):
+        """Backport simplified star nargs usage.
+
+        https://github.com/python/cpython/pull/17106
+        """
+        if sys.version_info >= (3, 9) or action.nargs != argparse.ZERO_OR_MORE:
+            return super()._format_args(action, default_metavar)
+
+        get_metavar = self._metavar_formatter(action, default_metavar)
+        metavar = get_metavar(1)
+        assert len(metavar) == 1
+        return f'[{metavar[0]} ...]'
+
 
 def _open_file(name, mode='w'):
     """Open a file with a preset newline/encoding mode."""
@@ -135,7 +155,7 @@ def _get_command_quickref(cmds):
     out.append('|Command|Description')
     for name, cmd in cmds:
         desc = inspect.getdoc(cmd.handler).splitlines()[0]
-        out.append('|<<{},{}>>|{}'.format(name, name, desc))
+        out.append('|<<{name},{name}>>|{desc}'.format(name=name, desc=desc))
     out.append('|==============')
     return '\n'.join(out)
 
@@ -160,7 +180,7 @@ def _get_configtypes():
         inspect.isclass(e) and
         # pylint: disable=protected-access
         e not in [configtypes.BaseType, configtypes.MappingType,
-                  configtypes._Numeric] and
+                  configtypes._Numeric, configtypes.FontBase] and
         # pylint: enable=protected-access
         issubclass(e, configtypes.BaseType))
     yield from inspect.getmembers(configtypes, predicate)
@@ -251,14 +271,18 @@ def _get_command_doc_count(cmd, parser):
         Strings which should be added to the docs.
     """
     for param in inspect.signature(cmd.handler).parameters.values():
-        if cmd.get_arg_info(param).count:
+        if cmd.get_arg_info(param).value in cmd.COUNT_COMMAND_VALUES:
             yield ""
             yield "==== count"
             try:
                 yield parser.arg_descs[param.name]
-            except KeyError as e:
-                raise KeyError("No description for count arg {!r} of command "
-                               "{!r}!".format(param.name, cmd.name)) from e
+            except KeyError:
+                try:
+                    yield parser.arg_descs['count']
+                except KeyError as e:
+                    raise KeyError("No description for count arg {!r} of "
+                                   "command {!r}!"
+                                   .format(param.name, cmd.name)) from e
 
 
 def _get_command_doc_notes(cmd):
@@ -350,8 +374,8 @@ def generate_commands(filename):
         normal_cmds = []
         other_cmds = []
         debug_cmds = []
-        for name, cmd in cmdutils.cmd_dict.items():
-            if cmd.deprecated:
+        for name, cmd in objects.commands.items():
+            if cmd.deprecated or name == 'Ni!':
                 continue
             if usertypes.KeyMode.normal not in cmd.modes:
                 other_cmds.append((name, cmd))
@@ -418,11 +442,12 @@ def _generate_setting_option(f, opt):
     f.write("=== {}".format(opt.name) + "\n")
     f.write(opt.description + "\n")
     if opt.restart:
-        f.write("This setting requires a restart.\n")
+        f.write("\nThis setting requires a restart.\n")
     if opt.supports_pattern:
         f.write("\nThis setting supports URL patterns.\n")
     if opt.no_autoconfig:
         f.write("\nThis setting can only be set in config.py.\n")
+    _generate_setting_backend_info(f, opt)
     f.write("\n")
     typ = opt.typ.get_name().replace(',', '&#44;')
     f.write('Type: <<types,{typ}>>\n'.format(typ=typ))
@@ -441,7 +466,6 @@ def _generate_setting_option(f, opt):
         f.write("\n")
 
     f.write("Default: {}\n".format(opt.typ.to_doc(opt.default)))
-    _generate_setting_backend_info(f, opt)
 
 
 def generate_settings(filename):
@@ -493,7 +517,7 @@ def _format_block(filename, what, data):
         if not found_start:
             raise Exception("Marker '// QUTE_{}_START' not found in "
                             "'{}'!".format(what, filename))
-        elif not found_end:
+        if not found_end:
             raise Exception("Marker '// QUTE_{}_END' not found in "
                             "'{}'!".format(what, filename))
     except:
@@ -536,14 +560,16 @@ def regenerate_cheatsheet():
     ]
 
     for filename, x, y in files:
-        subprocess.run(['inkscape', '-e', filename, '-b', 'white',
+        subprocess.run(['inkscape', '-o', filename, '-b', 'white',
                         '-w', str(x), '-h', str(y),
                         'misc/cheatsheet.svg'], check=True)
+        subprocess.run(['optipng', filename], check=True)
 
 
 def main():
     """Regenerate all documentation."""
     utils.change_cwd()
+    loader.load_components(skip_hooks=True)
     print("Generating manpage...")
     regenerate_manpage('doc/qutebrowser.1.asciidoc')
     print("Generating settings help...")

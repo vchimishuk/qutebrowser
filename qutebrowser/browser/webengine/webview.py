@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,21 +15,34 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """The main browser widget for QtWebEngine."""
 
-from PyQt5.QtCore import pyqtSignal, QUrl, PYQT_VERSION
+from typing import List, Iterable
+
+from PyQt5.QtCore import pyqtSignal, QUrl
 from PyQt5.QtGui import QPalette
-from PyQt5.QtWidgets import QWidget
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
 
 from qutebrowser.browser import shared
 from qutebrowser.browser.webengine import webenginesettings, certificateerror
 from qutebrowser.config import config
-from qutebrowser.utils import log, debug, usertypes, objreg, qtutils
-from qutebrowser.misc import miscwidgets
-from qutebrowser.qt import sip
+from qutebrowser.utils import log, debug, usertypes
+
+
+_QB_FILESELECTION_MODES = {
+    QWebEnginePage.FileSelectOpen: shared.FileSelectionMode.single_file,
+    QWebEnginePage.FileSelectOpenMultiple: shared.FileSelectionMode.multiple_files,
+    # WORKAROUND for https://bugreports.qt.io/browse/QTBUG-91489
+    #
+    # QtWebEngine doesn't expose this value from its internal
+    # FilePickerControllerPrivate::FileChooserMode enum (i.e. it's not included in
+    # the public QWebEnginePage::FileSelectionMode enum).
+    # However, QWebEnginePage::chooseFiles is still called with the matching value
+    # (2) when a file input with "webkitdirectory" is used.
+    QWebEnginePage.FileSelectionMode(2): shared.FileSelectionMode.folder,
+}
 
 
 class WebEngineView(QWebEngineView):
@@ -43,6 +56,7 @@ class WebEngineView(QWebEngineView):
 
         theme_color = self.style().standardPalette().color(QPalette.Base)
         if private:
+            assert webenginesettings.private_profile is not None
             profile = webenginesettings.private_profile
             assert profile.isOffTheRecord()
         else:
@@ -51,34 +65,9 @@ class WebEngineView(QWebEngineView):
                              parent=self)
         self.setPage(page)
 
-        if qtutils.version_check('5.11', compiled=False):
-            # Set a PseudoLayout as a WORKAROUND for
-            # https://bugreports.qt.io/browse/QTBUG-68224
-            # and other related issues.
-            sip.delete(self.layout())
-            self._layout = miscwidgets.PseudoLayout(self)
-
     def render_widget(self):
-        """Get the RenderWidgetHostViewQt for this view.
-
-        Normally, this would always be the focusProxy().
-        However, it sometimes isn't, so we use this as a WORKAROUND for
-        https://bugreports.qt.io/browse/QTBUG-68727
-        """
-        if 'lost-focusproxy' not in objreg.get('args').debug_flags:
-            proxy = self.focusProxy()
-            if proxy is not None:
-                return proxy
-
-        # We don't want e.g. a QMenu.
-        rwhv_class = 'QtWebEngineCore::RenderWidgetHostViewQtDelegateWidget'
-        children = [c for c in self.findChildren(QWidget)
-                    if c.isVisible() and c.inherits(rwhv_class)]
-
-        log.webview.debug("Found possibly lost focusProxy: {}"
-                          .format(children))
-
-        return children[-1] if children else None
+        """Get the RenderWidgetHostViewQt for this view."""
+        return self.focusProxy()
 
     def shutdown(self):
         self.page().shutdown()
@@ -140,6 +129,13 @@ class WebEngineView(QWebEngineView):
         tab = shared.get_tab(self._win_id, target)
         return tab._widget  # pylint: disable=protected-access
 
+    def contextMenuEvent(self, ev):
+        """Prevent context menus when rocker gestures are enabled."""
+        if config.val.input.mouse.rocker_gestures:
+            ev.ignore()
+            return
+        super().contextMenuEvent(ev)
+
 
 class WebEnginePage(QWebEnginePage):
 
@@ -189,42 +185,29 @@ class WebEnginePage(QWebEnginePage):
         """Override javaScriptConfirm to use qutebrowser prompts."""
         if self._is_shutting_down:
             return False
-        escape_msg = qtutils.version_check('5.11', compiled=False)
         try:
-            return shared.javascript_confirm(url, js_msg,
-                                             abort_on=[self.loadStarted,
-                                                       self.shutting_down],
-                                             escape_msg=escape_msg)
+            return shared.javascript_confirm(
+                url, js_msg, abort_on=[self.loadStarted, self.shutting_down])
         except shared.CallSuper:
             return super().javaScriptConfirm(url, js_msg)
 
-    if PYQT_VERSION > 0x050700:
-        # WORKAROUND
-        # Can't override javaScriptPrompt with older PyQt versions
-        # https://www.riverbankcomputing.com/pipermail/pyqt/2016-November/038293.html
-        def javaScriptPrompt(self, url, js_msg, default):
-            """Override javaScriptPrompt to use qutebrowser prompts."""
-            escape_msg = qtutils.version_check('5.11', compiled=False)
-            if self._is_shutting_down:
-                return (False, "")
-            try:
-                return shared.javascript_prompt(url, js_msg, default,
-                                                abort_on=[self.loadStarted,
-                                                          self.shutting_down],
-                                                escape_msg=escape_msg)
-            except shared.CallSuper:
-                return super().javaScriptPrompt(url, js_msg, default)
+    def javaScriptPrompt(self, url, js_msg, default):
+        """Override javaScriptPrompt to use qutebrowser prompts."""
+        if self._is_shutting_down:
+            return (False, "")
+        try:
+            return shared.javascript_prompt(
+                url, js_msg, default, abort_on=[self.loadStarted, self.shutting_down])
+        except shared.CallSuper:
+            return super().javaScriptPrompt(url, js_msg, default)
 
     def javaScriptAlert(self, url, js_msg):
         """Override javaScriptAlert to use qutebrowser prompts."""
         if self._is_shutting_down:
             return
-        escape_msg = qtutils.version_check('5.11', compiled=False)
         try:
-            shared.javascript_alert(url, js_msg,
-                                    abort_on=[self.loadStarted,
-                                              self.shutting_down],
-                                    escape_msg=escape_msg)
+            shared.javascript_alert(
+                url, js_msg, abort_on=[self.loadStarted, self.shutting_down])
         except shared.CallSuper:
             super().javaScriptAlert(url, js_msg)
 
@@ -240,7 +223,7 @@ class WebEnginePage(QWebEnginePage):
     def acceptNavigationRequest(self,
                                 url: QUrl,
                                 typ: QWebEnginePage.NavigationType,
-                                is_main_frame: bool):
+                                is_main_frame: bool) -> bool:
         """Override acceptNavigationRequest to forward it to the tab API."""
         type_map = {
             QWebEnginePage.NavigationTypeLinkClicked:
@@ -256,8 +239,38 @@ class WebEnginePage(QWebEnginePage):
             QWebEnginePage.NavigationTypeOther:
                 usertypes.NavigationRequest.Type.other,
         }
-        navigation = usertypes.NavigationRequest(url=url,
-                                                 navigation_type=type_map[typ],
-                                                 is_main_frame=is_main_frame)
+        try:
+            type_map[QWebEnginePage.NavigationTypeRedirect] = (
+                usertypes.NavigationRequest.Type.redirect)
+        except AttributeError:
+            # Added in Qt 5.14
+            pass
+
+        navigation = usertypes.NavigationRequest(
+            url=url,
+            navigation_type=type_map.get(
+                typ, usertypes.NavigationRequest.Type.other),
+            is_main_frame=is_main_frame)
         self.navigation_request.emit(navigation)
         return navigation.accepted
+
+    def chooseFiles(
+        self,
+        mode: QWebEnginePage.FileSelectionMode,
+        old_files: Iterable[str],
+        accepted_mimetypes: Iterable[str],
+    ) -> List[str]:
+        """Override chooseFiles to (optionally) invoke custom file uploader."""
+        handler = config.val.fileselect.handler
+        if handler == "default":
+            return super().chooseFiles(mode, old_files, accepted_mimetypes)
+        assert handler == "external", handler
+        try:
+            qb_mode = _QB_FILESELECTION_MODES[mode]
+        except KeyError:
+            log.webview.warning(
+                f"Got file selection mode {mode}, but we don't support that!"
+            )
+            return super().chooseFiles(mode, old_files, accepted_mimetypes)
+
+        return shared.choose_file(qb_mode=qb_mode)

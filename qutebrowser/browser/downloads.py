@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Shared QtWebKit/QtWebEngine code for downloads."""
 
@@ -28,24 +28,28 @@ import functools
 import pathlib
 import tempfile
 import enum
+from typing import Any, Dict, IO, List, MutableSequence, Optional, Union
 
 from PyQt5.QtCore import (pyqtSlot, pyqtSignal, Qt, QObject, QModelIndex,
                           QTimer, QAbstractListModel, QUrl)
 
 from qutebrowser.browser import pdfjs
-from qutebrowser.commands import cmdexc, cmdutils
+from qutebrowser.api import cmdutils
 from qutebrowser.config import config
 from qutebrowser.utils import (usertypes, standarddir, utils, message, log,
                                qtutils, objreg)
 from qutebrowser.qt import sip
 
 
-ModelRole = enum.IntEnum('ModelRole', ['item'], start=Qt.UserRole)
+class ModelRole(enum.IntEnum):
+
+    """Custom download model roles."""
+
+    item = Qt.UserRole
 
 
 # Remember the last used directory
-last_used_directory = None
-
+last_used_directory: Optional[str] = None
 
 # All REFRESH_INTERVAL milliseconds, speeds will be recalculated and downloads
 # redrawn.
@@ -60,12 +64,29 @@ class UnsupportedAttribute:
     supported with QtWebengine.
     """
 
-    pass
-
 
 class UnsupportedOperationError(Exception):
 
     """Raised when an operation is not supported with the given backend."""
+
+
+def init():
+    """Set the application wide downloads variables."""
+    global last_used_directory
+    last_used_directory = None
+
+    config.instance.changed.connect(_clear_last_used)
+
+
+@pyqtSlot()
+def shutdown():
+    temp_download_manager.cleanup()
+
+
+@config.change_filter('downloads.location.directory', function=True)
+def _clear_last_used():
+    global last_used_directory
+    last_used_directory = None
 
 
 def download_dir():
@@ -135,11 +156,12 @@ def create_full_filename(basename, filename):
     Return:
         The full absolute path, or None if filename creation was not possible.
     """
+    basename = utils.sanitize_filename(basename)
+    # Filename can be a full path so don't use sanitize_filename on it.
     # Remove chars which can't be encoded in the filename encoding.
     # See https://github.com/qutebrowser/qutebrowser/issues/427
     encoding = sys.getfilesystemencoding()
     filename = utils.force_encoding(filename, encoding)
-    basename = utils.force_encoding(basename, encoding)
     if os.path.isabs(filename) and (os.path.isdir(filename) or
                                     filename.endswith(os.sep)):
         # We got an absolute directory from the user, so we save it under
@@ -160,8 +182,7 @@ def get_filename_question(*, suggested_filename, url, parent=None):
         url: The URL the download originated from.
         parent: The parent of the question (a QObject).
     """
-    encoding = sys.getfilesystemencoding()
-    suggested_filename = utils.force_encoding(suggested_filename, encoding)
+    suggested_filename = utils.sanitize_filename(suggested_filename)
 
     q = usertypes.Question(parent)
     q.title = "Save file to:"
@@ -206,12 +227,14 @@ def suggested_fn_from_title(url_path, title=None):
     """
     ext_whitelist = [".html", ".htm", ".php", ""]
     _, ext = os.path.splitext(url_path)
+
+    suggested_fn: Optional[str] = None
     if ext.lower() in ext_whitelist and title:
-        suggested_fn = utils.sanitize_filename(title)
+        suggested_fn = utils.sanitize_filename(title, shorten=True)
         if not suggested_fn.lower().endswith((".html", ".htm")):
             suggested_fn += ".html"
-    else:
-        suggested_fn = None
+            suggested_fn = utils.sanitize_filename(suggested_fn, shorten=True)
+
     return suggested_fn
 
 
@@ -328,11 +351,11 @@ class DownloadItemStats(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.total = None
-        self.done = 0
+        self.done = None
         self.speed = 0
         self._last_done = 0
         samples = int(self.SPEED_AVG_WINDOW * (1000 / _REFRESH_INTERVAL))
-        self._speed_avg = collections.deque(maxlen=samples)
+        self._speed_avg: MutableSequence[float] = collections.deque(maxlen=samples)
 
     def update_speed(self):
         """Recalculate the current download speed.
@@ -356,9 +379,10 @@ class DownloadItemStats(QObject):
         """The current download percentage, or None if unknown."""
         if self.done == self.total:
             return 100
-        elif self.total == 0 or self.total is None:
+        elif self.total is None:
             return None
         else:
+            assert self.done is not None
             return 100 * self.done / self.total
 
     def remaining_time(self):
@@ -402,6 +426,7 @@ class AbstractDownloadItem(QObject):
         raw_headers: The headers sent by the server.
         _filename: The filename of the download.
         _dead: Whether the Download has _die()'d.
+        _manager: The DownloadManager which started this download.
 
     Signals:
         data_changed: The downloads metadata changed.
@@ -411,8 +436,9 @@ class AbstractDownloadItem(QObject):
                arg: The error message as string.
         remove_requested: Emitted when the removal of this download was
                           requested.
-        pdfjs_requested: Emitted when PDF.js should be opened with the given
-                         filename.
+        pdfjs_requested: Emitted when PDF.js should be opened.
+                         arg 1: The filename of the PDF download.
+                         arg 2: The original download URL.
     """
 
     data_changed = pyqtSignal()
@@ -420,10 +446,11 @@ class AbstractDownloadItem(QObject):
     error = pyqtSignal(str)
     cancelled = pyqtSignal()
     remove_requested = pyqtSignal()
-    pdfjs_requested = pyqtSignal(str)
+    pdfjs_requested = pyqtSignal(str, QUrl)
 
-    def __init__(self, parent=None):
+    def __init__(self, manager, parent=None):
         super().__init__(parent)
+        self._manager = manager
         self.done = False
         self.stats = DownloadItemStats(self)
         self.index = 0
@@ -431,10 +458,14 @@ class AbstractDownloadItem(QObject):
         self.basename = '???'
         self.successful = False
 
-        self.fileobj = UnsupportedAttribute()
-        self.raw_headers = UnsupportedAttribute()
+        self.fileobj: Union[
+            UnsupportedAttribute, IO[bytes], None
+        ] = UnsupportedAttribute()
+        self.raw_headers: Union[
+            UnsupportedAttribute, Dict[bytes, bytes]
+        ] = UnsupportedAttribute()
 
-        self._filename = None
+        self._filename: Optional[str] = None
         self._dead = False
 
     def __repr__(self):
@@ -517,20 +548,18 @@ class AbstractDownloadItem(QObject):
             position: The color type requested, can be 'fg' or 'bg'.
         """
         assert position in ["fg", "bg"]
-        # pylint: disable=bad-config-option
         start = getattr(config.val.colors.downloads.start, position)
         stop = getattr(config.val.colors.downloads.stop, position)
         system = getattr(config.val.colors.downloads.system, position)
         error = getattr(config.val.colors.downloads.error, position)
-        # pylint: enable=bad-config-option
         if self.error_msg is not None:
             assert not self.successful
             return error
         elif self.stats.percentage() is None:
             return start
         else:
-            return utils.interpolate_color(start, stop,
-                                           self.stats.percentage(), system)
+            return qtutils.interpolate_color(
+                start, stop, self.stats.percentage(), system)
 
     def _do_cancel(self):
         """Actual cancel implementation."""
@@ -543,6 +572,7 @@ class AbstractDownloadItem(QObject):
         Args:
             remove_data: Whether to remove the downloaded data.
         """
+        assert not self.done
         self._do_cancel()
         log.downloads.debug("cancelled")
         if remove_data:
@@ -580,6 +610,10 @@ class AbstractDownloadItem(QObject):
         except UnsupportedOperationError as e:
             message.error(str(e))
 
+    def url(self) -> QUrl:
+        """Get the download's origin URL."""
+        raise NotImplementedError
+
     def _get_open_filename(self):
         """Get the filename to open a download.
 
@@ -588,7 +622,7 @@ class AbstractDownloadItem(QObject):
         raise NotImplementedError
 
     @pyqtSlot()
-    def open_file(self, cmdline=None):
+    def open_file(self, cmdline=None, open_dir=False):
         """Open the downloaded file.
 
         Args:
@@ -596,12 +630,15 @@ class AbstractDownloadItem(QObject):
                      filename. None means to use the system's default
                      application or `downloads.open_dispatcher` if set. If no
                      `{}` is found, the filename is appended to the cmdline.
+            open_dir: Specify whether to open the file's directory instead.
         """
         assert self.successful
         filename = self._get_open_filename()
         if filename is None:  # pragma: no cover
             log.downloads.error("No filename to open the download!")
             return
+        if open_dir:
+            filename = os.path.dirname(filename)
         # By using a singleshot timer, we ensure that we return fast. This
         # is important on systems where process creation takes long, as
         # otherwise the prompt might hang around and cause bugs
@@ -616,7 +653,7 @@ class AbstractDownloadItem(QObject):
         """Finish initialization based on self._filename."""
         raise NotImplementedError
 
-    def _ask_confirm_question(self, title, msg):
+    def _ask_confirm_question(self, title, msg, *, custom_yes_action=None):
         """Ask a confirmation question for the download."""
         raise NotImplementedError
 
@@ -698,6 +735,7 @@ class AbstractDownloadItem(QObject):
             remember_directory: If True, remember the directory for future
                                 downloads.
         """
+        assert self._filename is not None
         global last_used_directory
 
         try:
@@ -710,7 +748,13 @@ class AbstractDownloadItem(QObject):
             last_used_directory = os.path.dirname(self._filename)
 
         log.downloads.debug("Setting filename to {}".format(self._filename))
-        if force_overwrite:
+        if self._get_conflicting_download():
+            txt = ("<b>{}</b> is already downloading. Cancel and "
+                   "re-download?".format(html.escape(self._filename)))
+            self._ask_confirm_question(
+                "Cancel other download?", txt,
+                custom_yes_action=self._cancel_conflicting_download)
+        elif force_overwrite:
             self._after_set_filename()
         elif os.path.isfile(self._filename):
             # The file already exists, so ask the user if it should be
@@ -726,6 +770,28 @@ class AbstractDownloadItem(QObject):
             self._ask_confirm_question("Overwrite special file?", txt)
         else:
             self._after_set_filename()
+
+    def _conflicts_with(self, other: 'AbstractDownloadItem') -> bool:
+        """Check if this download conflicts with the other given one."""
+        return (
+            other is not self and
+            other._filename == self._filename and  # pylint: disable=protected-access
+            not other.done
+        )
+
+    def _get_conflicting_download(self):
+        """Return another potential active download with the same name."""
+        for download in self._manager.downloads:
+            if self._conflicts_with(download):
+                return download
+        return None
+
+    def _cancel_conflicting_download(self):
+        """Cancel any conflicting download and call _after_set_filename."""
+        conflicting_download = self._get_conflicting_download()
+        if conflicting_download:
+            conflicting_download.cancel(remove_data=False)
+        self._after_set_filename()
 
     def _open_if_successful(self, cmdline):
         """Open the downloaded file, but only if it was successful.
@@ -750,7 +816,8 @@ class AbstractDownloadItem(QObject):
         if filename is None:  # pragma: no cover
             log.downloads.error("No filename to open the download!")
             return
-        self.pdfjs_requested.emit(os.path.basename(filename))
+        self.pdfjs_requested.emit(os.path.basename(filename),
+                                  self.url())
 
     def set_target(self, target):
         """Set the target for a given download.
@@ -810,7 +877,7 @@ class AbstractDownloadManager(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.downloads = []
+        self.downloads: List[AbstractDownloadItem] = []
         self._update_timer = usertypes.Timer(self, 'download-update')
         self._update_timer.timeout.connect(self._update_gui)
         self._update_timer.setInterval(_REFRESH_INTERVAL)
@@ -826,12 +893,13 @@ class AbstractDownloadManager(QObject):
             dl.stats.update_speed()
         self.data_changed.emit(-1)
 
-    @pyqtSlot(str)
-    def _on_pdfjs_requested(self, filename):
+    @pyqtSlot(str, QUrl)
+    def _on_pdfjs_requested(self, filename: str, original_url: QUrl) -> None:
         """Open PDF.js when a download requests it."""
         tabbed_browser = objreg.get('tabbed-browser', scope='window',
                                     window='last-focused')
-        tabbed_browser.tabopen(pdfjs.get_main_url(filename), background=False)
+        tabbed_browser.tabopen(pdfjs.get_main_url(filename, original_url),
+                               background=False)
 
     def _init_item(self, download, auto_remove, suggested_filename):
         """Initialize a newly created DownloadItem."""
@@ -908,6 +976,13 @@ class AbstractDownloadManager(QObject):
         question.cancelled.connect(download.cancel)
         download.cancelled.connect(question.abort)
         download.error.connect(question.abort)
+
+    @pyqtSlot()
+    def shutdown(self):
+        """Cancel all downloads when shutting down."""
+        for download in self.downloads:
+            if not download.done:
+                download.cancel(remove_data=False)
 
 
 class DownloadModel(QAbstractListModel):
@@ -1007,11 +1082,11 @@ class DownloadModel(QAbstractListModel):
             count: The index of the download
         """
         if not count:
-            raise cmdexc.CommandError("There's no download!")
-        raise cmdexc.CommandError("There's no download {}!".format(count))
+            raise cmdutils.CommandError("There's no download!")
+        raise cmdutils.CommandError("There's no download {}!".format(count))
 
     @cmdutils.register(instance='download-model', scope='window')
-    @cmdutils.argument('count', count=True)
+    @cmdutils.argument('count', value=cmdutils.Value.count)
     def download_cancel(self, all_=False, count=0):
         """Cancel the last/[count]th download.
 
@@ -1032,12 +1107,12 @@ class DownloadModel(QAbstractListModel):
             if download.done:
                 if not count:
                     count = len(self)
-                raise cmdexc.CommandError("Download {} is already done!"
-                                          .format(count))
+                raise cmdutils.CommandError("Download {} is already done!"
+                                            .format(count))
             download.cancel()
 
     @cmdutils.register(instance='download-model', scope='window')
-    @cmdutils.argument('count', count=True)
+    @cmdutils.argument('count', value=cmdutils.Value.count)
     def download_delete(self, count=0):
         """Delete the last/[count]th download from disk.
 
@@ -1051,14 +1126,16 @@ class DownloadModel(QAbstractListModel):
         if not download.successful:
             if not count:
                 count = len(self)
-            raise cmdexc.CommandError("Download {} is not done!".format(count))
+            raise cmdutils.CommandError("Download {} is not done!"
+                                        .format(count))
         download.delete()
         download.remove()
         log.downloads.debug("deleted download {}".format(download))
 
     @cmdutils.register(instance='download-model', scope='window', maxsplit=0)
-    @cmdutils.argument('count', count=True)
-    def download_open(self, cmdline: str = None, count=0):
+    @cmdutils.argument('count', value=cmdutils.Value.count)
+    def download_open(self, cmdline: str = None, count: int = 0,
+                      dir_: bool = False) -> None:
         """Open the last/[count]th download.
 
         If no specific command is given, this will use the system's default
@@ -1070,6 +1147,7 @@ class DownloadModel(QAbstractListModel):
                      present, the filename is automatically appended to the
                      cmdline.
             count: The index of the download to open.
+            dir_: Whether to open the file's directory instead.
         """
         try:
             download = self[count - 1]
@@ -1078,11 +1156,12 @@ class DownloadModel(QAbstractListModel):
         if not download.successful:
             if not count:
                 count = len(self)
-            raise cmdexc.CommandError("Download {} is not done!".format(count))
-        download.open_file(cmdline)
+            raise cmdutils.CommandError("Download {} is not done!"
+                                        .format(count))
+        download.open_file(cmdline, open_dir=dir_)
 
     @cmdutils.register(instance='download-model', scope='window')
-    @cmdutils.argument('count', count=True)
+    @cmdutils.argument('count', value=cmdutils.Value.count)
     def download_retry(self, count=0):
         """Retry the first failed/[count]th download.
 
@@ -1095,14 +1174,13 @@ class DownloadModel(QAbstractListModel):
             except IndexError:
                 self._raise_no_download(count)
             if download.successful or not download.done:
-                raise cmdexc.CommandError("Download {} did not fail!".format(
-                    count))
+                raise cmdutils.CommandError("Download {} did not fail!"
+                                            .format(count))
         else:
             to_retry = [d for d in self if d.done and not d.successful]
             if not to_retry:
-                raise cmdexc.CommandError("No failed downloads!")
-            else:
-                download = to_retry[0]
+                raise cmdutils.CommandError("No failed downloads!")
+            download = to_retry[0]
         download.try_retry()
 
     def can_clear(self):
@@ -1117,7 +1195,7 @@ class DownloadModel(QAbstractListModel):
                 download.remove()
 
     @cmdutils.register(instance='download-model', scope='window')
-    @cmdutils.argument('count', count=True)
+    @cmdutils.argument('count', value=cmdutils.Value.count)
     def download_remove(self, all_=False, count=0):
         """Remove the last/[count]th download from the list.
 
@@ -1135,8 +1213,8 @@ class DownloadModel(QAbstractListModel):
             if not download.done:
                 if not count:
                     count = len(self)
-                raise cmdexc.CommandError("Download {} is not done!"
-                                          .format(count))
+                raise cmdutils.CommandError("Download {} is not done!"
+                                            .format(count))
             download.remove()
 
     def running_downloads(self):
@@ -1174,7 +1252,7 @@ class DownloadModel(QAbstractListModel):
 
         item = self[index.row()]
         if role == Qt.DisplayRole:
-            data = str(item)
+            data: Any = str(item)
         elif role == Qt.ForegroundRole:
             data = item.get_status_color('fg')
         elif role == Qt.BackgroundRole:
@@ -1211,7 +1289,7 @@ class TempDownloadManager:
 
     """Manager to handle temporary download files.
 
-    The downloads are downloaded to a temporary location and then openened with
+    The downloads are downloaded to a temporary location and then opened with
     the system standard application. The temporary files are deleted when
     qutebrowser is shutdown.
 
@@ -1220,7 +1298,7 @@ class TempDownloadManager:
     """
 
     def __init__(self):
-        self.files = []
+        self.files: MutableSequence[IO[bytes]] = []
         self._tmpdir = None
 
     def cleanup(self):
@@ -1254,14 +1332,13 @@ class TempDownloadManager:
 
         Args:
             suggested_name: str of the "suggested"/original filename. Used as a
-                            suffix, so any file extenions are preserved.
+                            suffix, so any file extensions are preserved.
 
         Return:
             A tempfile.NamedTemporaryFile that should be used to save the file.
         """
         tmpdir = self.get_tmpdir()
-        encoding = sys.getfilesystemencoding()
-        suggested_name = utils.force_encoding(suggested_name, encoding)
+        suggested_name = utils.sanitize_filename(suggested_name)
         # Make sure that the filename is not too long
         suggested_name = utils.elide_filename(suggested_name, 50)
         fobj = tempfile.NamedTemporaryFile(dir=tmpdir.name, delete=False,

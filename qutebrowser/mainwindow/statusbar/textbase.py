@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Base text widgets for statusbar."""
 
@@ -33,7 +33,7 @@ class TextBase(QLabel):
     Unlike QLabel, the text will get elided.
 
     Eliding is loosely based on
-    http://gedgedev.blogspot.ch/2010/12/elided-labels-in-qt.html
+    https://gedgedev.blogspot.ch/2010/12/elided-labels-in-qt.html
 
     Attributes:
         _elidemode: Where to elide the text.
@@ -62,27 +62,14 @@ class TextBase(QLabel):
             self._elided_text = ''
 
     def setText(self, txt):
-        """Extend QLabel::setText.
-
-        This update the elided text after setting the text, and also works
-        around a weird QLabel redrawing bug where it doesn't redraw correctly
-        when the text is empty -- we explicitly need to call repaint() to
-        resolve this.
-
-        More info:
-
-        http://stackoverflow.com/q/21890462/2085149
-        https://bugreports.qt.io/browse/QTBUG-36945
-        https://codereview.qt-project.org/#/c/79181/
+        """Extend QLabel::setText to update the elided text afterwards.
 
         Args:
             txt: The text to set (string).
         """
         super().setText(txt)
-        self._update_elided_text(self.geometry().width())
-        if not txt:
-            # WORKAROUND
-            self.repaint()
+        if self._elidemode != Qt.ElideNone:
+            self._update_elided_text(self.geometry().width())
 
     def resizeEvent(self, e):
         """Extend QLabel::resizeEvent to update the elided text afterwards."""
@@ -101,4 +88,4 @@ class TextBase(QLabel):
             geom = self.geometry()
             qtutils.ensure_valid(geom)
             painter.drawText(0, 0, geom.width(), geom.height(),
-                             self.alignment(), self._elided_text)
+                             int(self.alignment()), self._elided_text)

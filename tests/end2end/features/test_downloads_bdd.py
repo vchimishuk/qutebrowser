@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2015-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2015-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
 import sys
@@ -28,25 +28,33 @@ bdd.scenarios('downloads.feature')
 
 
 PROMPT_MSG = ("Asking question <qutebrowser.utils.usertypes.Question "
-              "default={!r} mode=<PromptMode.download: 5> text=* "
-              "title='Save file to:'>, *")
+              "default={!r} mode=PromptMode.download option=None "
+              "text=* title='Save file to:'>, *")
+
+
+@pytest.fixture
+def download_dir(tmpdir):
+    downloads = tmpdir / 'downloads'
+    downloads.ensure(dir=True)
+    (downloads / 'subdir').ensure(dir=True)
+    try:
+        os.mkfifo(str(downloads / 'fifo'))
+    except AttributeError:
+        pass
+    unwritable = downloads / 'unwritable'
+    unwritable.ensure(dir=True)
+    unwritable.chmod(0)
+
+    yield downloads
+
+    unwritable.chmod(0o755)
 
 
 @bdd.given("I set up a temporary download dir")
-def temporary_download_dir(quteproc, tmpdir):
-    download_dir = tmpdir / 'downloads'
-    download_dir.ensure(dir=True)
+def temporary_download_dir(quteproc, download_dir):
     quteproc.set_setting('downloads.location.prompt', 'false')
     quteproc.set_setting('downloads.location.remember', 'false')
     quteproc.set_setting('downloads.location.directory', str(download_dir))
-    (download_dir / 'subdir').ensure(dir=True)
-    try:
-        os.mkfifo(str(download_dir / 'fifo'))
-    except AttributeError:
-        pass
-    unwritable = download_dir / 'unwritable'
-    unwritable.ensure(dir=True)
-    unwritable.chmod(0)
 
 
 @bdd.given("I clean old downloads")
@@ -88,12 +96,6 @@ def wait_for_download_prompt(tmpdir, quteproc, path):
                       "(reason: question asked)")
 
 
-@bdd.when("I download an SSL page")
-def download_ssl_page(quteproc, ssl_server):
-    quteproc.send_cmd(':download https://localhost:{}/'
-                      .format(ssl_server.port))
-
-
 @bdd.then(bdd.parsers.parse("The downloaded file {filename} should not exist"))
 def download_should_not_exist(filename, tmpdir):
     path = tmpdir / 'downloads' / filename
@@ -125,7 +127,7 @@ def download_contents(filename, text, tmpdir):
 def download_prompt(tmpdir, quteproc, path):
     full_path = path.replace('(tmpdir)', str(tmpdir)).replace('/', os.sep)
     quteproc.wait_for(message=PROMPT_MSG.format(full_path))
-    quteproc.send_cmd(':leave-mode')
+    quteproc.send_cmd(':mode-leave')
 
 
 @bdd.when("I set a test python open_dispatcher")

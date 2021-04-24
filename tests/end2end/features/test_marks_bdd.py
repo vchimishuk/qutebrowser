@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2016-2018 Ryan Roden-Corrent (rcorre) <ryan@rcorre.net>
+# Copyright 2016-2021 Ryan Roden-Corrent (rcorre) <ryan@rcorre.net>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 import pytest
 
@@ -25,9 +25,7 @@ bdd.scenarios('marks.feature')
 
 @pytest.fixture(autouse=True)
 def turn_on_scroll_logging(quteproc):
-    """Make sure all scrolling changes are logged."""
-    quteproc.send_cmd(":debug-pyeval -q objreg.get('args')."
-                      "debug_flags.append('no-scroll-filtering')")
+    quteproc.turn_on_scroll_logging(no_scroll_filtering=True)
 
 
 @bdd.then(bdd.parsers.parse("the page should be scrolled to {x} {y}"))

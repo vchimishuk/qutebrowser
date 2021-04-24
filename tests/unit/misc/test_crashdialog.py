@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2015-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2015-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Tests for qutebrowser.misc.crashdialog."""
 
@@ -86,7 +86,7 @@ def test_parse_fatal_stacktrace(text, typ, func):
     ),
     ({'LANGUAGE': 'foo', 'LANG': 'en_US.UTF-8'}, "LANG = en_US.UTF-8"),
     ({'FOO': 'bar', 'QUTE_BLAH': '1'}, "QUTE_BLAH = 1"),
-], ids=lambda e: e[1])
+])
 def test_get_environment_vars(monkeypatch, env, expected):
     """Test for crashdialog._get_environment_vars."""
     for key in os.environ.copy():

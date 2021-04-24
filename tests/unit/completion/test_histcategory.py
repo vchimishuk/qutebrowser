@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2016-2018 Ryan Roden-Corrent (rcorre) <ryan@rcorre.net>
+# Copyright 2016-2021 Ryan Roden-Corrent (rcorre) <ryan@rcorre.net>
 #
 # This file is part of qutebrowser.
 #
@@ -15,16 +15,20 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Test the web history completion category."""
 
 import datetime
+import logging
 
+import hypothesis
+from hypothesis import strategies
 import pytest
 
 from qutebrowser.misc import sql
 from qutebrowser.completion.models import histcategory
+from qutebrowser.utils import usertypes
 
 
 @pytest.fixture
@@ -82,6 +86,14 @@ def hist(init_sql, config_stub):
     ("ample itle",
      [('example.com', 'title'), ('example.com', 'nope')],
      [('example.com', 'title')]),
+
+    # https://github.com/qutebrowser/qutebrowser/issues/4411
+    ("mlfreq",
+     [('https://qutebrowser.org/FAQ.html', 'Frequently Asked Questions')],
+     []),
+    ("ml freq",
+     [('https://qutebrowser.org/FAQ.html', 'Frequently Asked Questions')],
+     [('https://qutebrowser.org/FAQ.html', 'Frequently Asked Questions')]),
 ])
 def test_set_pattern(pattern, before, after, model_validator, hist):
     """Validate the filtering and sorting results of set_pattern."""
@@ -123,6 +135,27 @@ def test_set_pattern_repeated(model_validator, hist):
     model_validator.validate([
         ('example.com/baz', 'title3'),
     ])
+
+
+@pytest.mark.parametrize('pattern', [
+    ' '.join(map(str, range(10000))),
+    'x' * 50000,
+], ids=['numbers', 'characters'])
+def test_set_pattern_long(hist, message_mock, caplog, pattern):
+    hist.insert({'url': 'example.com/foo', 'title': 'title1', 'last_atime': 1})
+    cat = histcategory.HistoryCategory()
+    with caplog.at_level(logging.ERROR):
+        cat.set_pattern(pattern)
+    msg = message_mock.getmsg(usertypes.MessageLevel.error)
+    assert msg.text.startswith("Error with SQL query:")
+
+
+@hypothesis.given(pat=strategies.text())
+def test_set_pattern_hypothesis(hist, pat, caplog):
+    hist.insert({'url': 'example.com/foo', 'title': 'title1', 'last_atime': 1})
+    cat = histcategory.HistoryCategory()
+    with caplog.at_level(logging.ERROR):
+        cat.set_pattern(pat)
 
 
 @pytest.mark.parametrize('max_items, before, after', [
@@ -222,3 +255,12 @@ def test_timestamp_fmt(fmt, expected, model_validator, config_stub, init_sql):
     model_validator.set_model(cat)
     cat.set_pattern('')
     model_validator.validate([('foo', '', expected)])
+
+
+def test_skip_duplicate_set(message_mock, caplog, hist):
+    cat = histcategory.HistoryCategory()
+    cat.set_pattern('foo')
+    cat.set_pattern('foobarbaz')
+    msg = caplog.messages[-1]
+    assert msg.startswith(
+        "Skipping query on foobarbaz due to prefix foo returning nothing.")

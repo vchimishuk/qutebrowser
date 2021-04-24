@@ -1,5 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
+# Copyright 2015-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 # Copyright 2015-2018 Antoni Boucher (antoyo) <bouanto@zoho.com>
 #
 # This file is part of qutebrowser.
@@ -15,11 +16,12 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
+import dataclasses
+from typing import List
 
-import attr
 import pytest
 import bs4
 from PyQt5.QtCore import QUrl
@@ -27,6 +29,7 @@ from PyQt5.QtNetwork import QNetworkRequest
 
 from qutebrowser.browser.webkit.network import filescheme
 from qutebrowser.utils import urlutils, utils
+from helpers import testutils
 
 
 @pytest.mark.parametrize('create_file, create_dir, filterfunc, expected', [
@@ -109,18 +112,18 @@ def _file_url(path):
 
 class TestDirbrowserHtml:
 
-    @attr.s
+    @dataclasses.dataclass
     class Parsed:
 
-        parent = attr.ib()
-        folders = attr.ib()
-        files = attr.ib()
+        parent: str
+        folders: List[str]
+        files: List[str]
 
-    @attr.s
+    @dataclasses.dataclass
     class Item:
 
-        link = attr.ib()
-        text = attr.ib()
+        link: str
+        text: str
 
     @pytest.fixture
     def parser(self):
@@ -128,7 +131,10 @@ class TestDirbrowserHtml:
         def parse(path):
             html = filescheme.dirbrowser_html(path).decode('utf-8')
             soup = bs4.BeautifulSoup(html, 'html.parser')
-            print(soup.prettify())
+
+            with testutils.ignore_bs4_warning():
+                print(soup.prettify())
+
             container = soup('div', id='dirbrowserContainer')[0]
 
             parent_elem = container('ul', class_='parent')
@@ -155,7 +161,10 @@ class TestDirbrowserHtml:
     def test_basic(self):
         html = filescheme.dirbrowser_html(os.getcwd()).decode('utf-8')
         soup = bs4.BeautifulSoup(html, 'html.parser')
-        print(soup.prettify())
+
+        with testutils.ignore_bs4_warning():
+            print(soup.prettify())
+
         container = soup.div
         assert container['id'] == 'dirbrowserContainer'
         title_elem = container('div', id='dirbrowserTitle')[0]
@@ -164,15 +173,14 @@ class TestDirbrowserHtml:
 
     def test_icons(self, monkeypatch):
         """Make sure icon paths are correct file:// URLs."""
-        monkeypatch.setattr(filescheme.jinja.utils, 'resource_filename',
-                            lambda name: '/test path/foo.svg')
-
         html = filescheme.dirbrowser_html(os.getcwd()).decode('utf-8')
         soup = bs4.BeautifulSoup(html, 'html.parser')
-        print(soup.prettify())
+
+        with testutils.ignore_bs4_warning():
+            print(soup.prettify())
 
         css = soup.html.head.style.string
-        assert "background-image: url('file:///test%20path/foo.svg');" in css
+        assert "background-image: url('qute://resource/img/folder.svg');" in css
 
     def test_empty(self, tmpdir, parser):
         parsed = parser(str(tmpdir))
@@ -238,7 +246,10 @@ class TestDirbrowserHtml:
         m.side_effect = OSError('Error message')
         html = filescheme.dirbrowser_html('').decode('utf-8')
         soup = bs4.BeautifulSoup(html, 'html.parser')
-        print(soup.prettify())
+
+        with testutils.ignore_bs4_warning():
+            print(soup.prettify())
+
         error_msg = soup('p', id='error-message-text')[0].string
         assert error_msg == 'Error message'
 

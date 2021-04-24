@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 
 """Test TextBase widget."""
@@ -44,6 +44,8 @@ def test_elided_text(fake_statusbar, qtbot, elidemode, check):
         check: function that receives the elided text and must return True
         if the ellipsis is placed correctly according to elidemode.
     """
+    fake_statusbar.container.expose()
+
     label = TextBase(elidemode=elidemode)
     qtbot.add_widget(label)
     fake_statusbar.hbox.addWidget(label)
@@ -55,17 +57,6 @@ def test_elided_text(fake_statusbar, qtbot, elidemode, check):
     assert check(label._elided_text)
 
 
-def test_settext_empty(mocker, qtbot):
-    """Make sure using setText('') works and runs repaint."""
-    label = TextBase()
-    qtbot.add_widget(label)
-    mocker.patch('qutebrowser.mainwindow.statusbar.textbase.TextBase.repaint',
-                 autospec=True)
-
-    label.setText('')
-    label.repaint.assert_called_with()  # pylint: disable=no-member
-
-
 def test_resize(qtbot):
     """Make sure the elided text is updated when resizing."""
     label = TextBase()
@@ -73,7 +64,7 @@ def test_resize(qtbot):
     long_string = 'Hello world! ' * 20
     label.setText(long_string)
 
-    with qtbot.waitExposed(label):
+    with qtbot.wait_exposed(label):
         label.show()
 
     text_1 = label._elided_text
@@ -92,7 +83,7 @@ def test_text_elide_none(mocker, qtbot):
                  'fontMetrics')
     label._update_elided_text(20)
 
-    assert not label.fontMetrics.called  # pylint: disable=no-member
+    assert not label.fontMetrics.called
 
 
 def test_unset_text(qtbot):

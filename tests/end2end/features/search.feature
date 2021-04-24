@@ -213,20 +213,72 @@ Feature: Searching on a page
     # TODO: wrapping message with scrolling
     # TODO: wrapping message without scrolling
 
+    ## wrapping prevented
+
+    @qtwebkit_skip @qt>=5.14
+    Scenario: Preventing wrapping at the top of the page with QtWebEngine
+        When I set search.ignore_case to always
+        And I set search.wrap to false
+        And I run :search --reverse foo
+        And I wait for "search found foo with flags FindBackward" in the log
+        And I run :search-next
+        And I wait for "next_result found foo with flags FindBackward" in the log
+        And I run :search-next
+        And I wait for "Search hit TOP" in the log
+        Then "foo" should be found
+
+    @qtwebkit_skip @qt>=5.14
+    Scenario: Preventing wrapping at the bottom of the page with QtWebEngine
+        When I set search.ignore_case to always
+        And I set search.wrap to false
+        And I run :search foo
+        And I wait for "search found foo" in the log
+        And I run :search-next
+        And I wait for "next_result found foo" in the log
+        And I run :search-next
+        And I wait for "Search hit BOTTOM" in the log
+        Then "Foo" should be found
+
+    @qtwebengine_skip
+    Scenario: Preventing wrapping at the top of the page with QtWebKit
+        When I set search.ignore_case to always
+        And I set search.wrap to false
+        And I run :search --reverse foo
+        And I wait for "search found foo with flags FindBackward" in the log
+        And I run :search-next
+        And I wait for "next_result found foo with flags FindBackward" in the log
+        And I run :search-next
+        And I wait for "next_result didn't find foo with flags FindBackward" in the log
+        Then the warning "Text 'foo' not found on page!" should be shown
+
+    @qtwebengine_skip
+    Scenario: Preventing wrapping at the bottom of the page with QtWebKit
+        When I set search.ignore_case to always
+        And I set search.wrap to false
+        And I run :search foo
+        And I wait for "search found foo" in the log
+        And I run :search-next
+        And I wait for "next_result found foo" in the log
+        And I run :search-next
+        And I wait for "next_result didn't find foo" in the log
+        Then the warning "Text 'foo' not found on page!" should be shown
+
     ## follow searched links
-    @flaky
+    @skip  # Too flaky
     Scenario: Follow a searched link
         When I run :search follow
         And I wait for "search found follow" in the log
-        And I run :follow-selected
+        And I wait 0.5s
+        And I run :selection-follow
         Then data/hello.txt should be loaded
 
-    @flaky
+    @skip  # Too flaky
     Scenario: Follow a searched link in a new tab
         When I run :window-only
         And I run :search follow
         And I wait for "search found follow" in the log
-        And I run :follow-selected -t
+        And I wait 0.5s
+        And I run :selection-follow -t
         And I wait until data/hello.txt is loaded
         Then the following tabs should be open:
             - data/search.html
@@ -236,7 +288,7 @@ Feature: Searching on a page
         When I run :window-only
         And I run :search foo
         And I wait for "search found foo" in the log
-        And I run :follow-selected
+        And I run :selection-follow
         Then the following tabs should be open:
             - data/search.html (active)
 
@@ -244,19 +296,19 @@ Feature: Searching on a page
         When I run :window-only
         And I run :search foo
         And I wait for "search found foo" in the log
-        And I run :follow-selected -t
+        And I run :selection-follow -t
         Then the following tabs should be open:
             - data/search.html (active)
 
     Scenario: Follow a manually selected link
         When I run :jseval --file (testdata)/search_select.js
-        And I run :follow-selected
+        And I run :selection-follow
         Then data/hello.txt should be loaded
 
     Scenario: Follow a manually selected link in a new tab
         When I run :window-only
         And I run :jseval --file (testdata)/search_select.js
-        And I run :follow-selected -t
+        And I run :selection-follow -t
         And I wait until data/hello.txt is loaded
         Then the following tabs should be open:
             - data/search.html
@@ -269,17 +321,24 @@ Feature: Searching on a page
         And I run :tab-only
         And I run :search follow
         And I wait for "search found follow" in the log
-        And I run :follow-selected
+        And I run :selection-follow
         Then "navigation request: url http://localhost:*/data/hello.txt, type Type.link_clicked, is_main_frame False" should be logged
 
-    @qtwebkit_skip: Not supported in qtwebkit @flaky
+    # Too flaky
+    @qtwebkit_skip: Not supported in qtwebkit @skip
     Scenario: Follow a tabbed searched link in an iframe
         When I open data/iframe_search.html
         And I run :tab-only
         And I run :search follow
         And I wait for "search found follow" in the log
-        And I run :follow-selected -t
+        And I run :selection-follow -t
         And I wait until data/hello.txt is loaded
         Then the following tabs should be open:
             - data/iframe_search.html
             - data/hello.txt (active)
+
+    Scenario: Closing a tab during a search
+        When I run :open -b about:blank
+        And I run :search a
+        And I run :tab-close
+        Then no crash should happen

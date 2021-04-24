@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Launcher for an external editor."""
 
@@ -28,6 +28,7 @@ from PyQt5.QtCore import (pyqtSignal, pyqtSlot, QObject, QProcess,
 from qutebrowser.config import config
 from qutebrowser.utils import message, log
 from qutebrowser.misc import guiprocess
+from qutebrowser.qt import sip
 
 
 class ExternalEditor(QObject):
@@ -61,13 +62,18 @@ class ExternalEditor(QObject):
         self._watcher = QFileSystemWatcher(parent=self) if watch else None
         self._content = None
 
-    def _cleanup(self):
-        """Clean up temporary files after the editor closed."""
-        assert self._remove_file is not None
+    def _cleanup(self, *, successful):
+        """Clean up temporary files after the editor closed.
 
-        watched_files = self._watcher.files() if self._watcher else []
-        if watched_files:
-            failed = self._watcher.removePaths(watched_files)
+        Args:
+            successful: Whether the editor exited successfully, i.e. the file can be
+                        deleted.
+        """
+        assert self._remove_file is not None
+        if (self._watcher is not None and
+                not sip.isdeleted(self._watcher) and
+                self._watcher.files()):
+            failed = self._watcher.removePaths(self._watcher.files())
             if failed:
                 log.procs.error("Failed to unwatch paths: {}".format(failed))
 
@@ -75,33 +81,44 @@ class ExternalEditor(QObject):
             # Could not create initial file.
             return
 
-        try:
-            if self._proc.exit_status() != QProcess.CrashExit:
+        assert self._proc is not None
+
+        if successful:
+            try:
                 os.remove(self._filename)
-        except OSError as e:
-            # NOTE: Do not replace this with "raise CommandError" as it's
-            # executed async.
-            message.error("Failed to delete tempfile... ({})".format(e))
+            except OSError as e:
+                # NOTE: Do not replace this with "raise CommandError" as it's
+                # executed async.
+                message.error("Failed to delete tempfile... ({})".format(e))
+        else:
+            message.info(f"Keeping file {self._filename} as the editor process exited "
+                         "abnormally")
 
     @pyqtSlot(int, QProcess.ExitStatus)
-    def on_proc_closed(self, _exitcode, exitstatus):
+    def _on_proc_closed(self, _exitcode, exitstatus):
         """Write the editor text into the form field and clean up tempfile.
 
         Callback for QProcess when the editor was closed.
         """
+        if sip.isdeleted(self):  # pragma: no cover
+            log.procs.debug("Ignoring _on_proc_closed for deleted editor")
+            return
+
         log.procs.debug("Editor closed")
         if exitstatus != QProcess.NormalExit:
             # No error/cleanup here, since we already handle this in
             # on_proc_error.
             return
+
         # do a final read to make sure we don't miss the last signal
+        assert self._proc is not None
         self._on_file_changed(self._filename)
         self.editing_finished.emit()
-        self._cleanup()
+        self._cleanup(successful=self._proc.outcome.was_successful())
 
     @pyqtSlot(QProcess.ProcessError)
-    def on_proc_error(self, _err):
-        self._cleanup()
+    def _on_proc_error(self, _err):
+        self._cleanup(successful=False)
 
     def edit(self, text, caret_position=None):
         """Edit a given text.
@@ -164,6 +181,9 @@ class ExternalEditor(QObject):
 
     def edit_file(self, filename):
         """Edit the file with the given filename."""
+        if not os.path.exists(filename):
+            with open(filename, 'w', encoding='utf-8'):
+                pass
         self._filename = filename
         self._remove_file = False
         self._start_editor()
@@ -176,17 +196,19 @@ class ExternalEditor(QObject):
             column: the column number to pass to the editor
         """
         self._proc = guiprocess.GUIProcess(what='editor', parent=self)
-        self._proc.finished.connect(self.on_proc_closed)
-        self._proc.error.connect(self.on_proc_error)
+        self._proc.finished.connect(self._on_proc_closed)
+        self._proc.error.connect(self._on_proc_error)
         editor = config.val.editor.command
         executable = editor[0]
 
         if self._watcher:
+            assert self._filename is not None
             ok = self._watcher.addPath(self._filename)
             if not ok:
                 log.procs.error("Failed to watch path: {}"
                                 .format(self._filename))
-            self._watcher.fileChanged.connect(self._on_file_changed)
+            self._watcher.fileChanged.connect(  # type: ignore[attr-defined]
+                self._on_file_changed)
 
         args = [self._sub_placeholder(arg, line, column) for arg in editor[1:]]
         log.procs.debug("Calling \"{}\" with args {}".format(executable, args))

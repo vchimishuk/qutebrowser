@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Utilities used for the documentation and built-in help."""
 
@@ -25,18 +25,19 @@ import inspect
 import os.path
 import collections
 import enum
+from typing import Callable, MutableMapping, Optional, List, Union
 
 import qutebrowser
 from qutebrowser.utils import log, utils
 
 
-def is_git_repo():
+def is_git_repo() -> bool:
     """Check if we're running from a git repository."""
     gitfolder = os.path.join(qutebrowser.basedir, os.path.pardir, '.git')
     return os.path.isdir(gitfolder)
 
 
-def docs_up_to_date(path):
+def docs_up_to_date(path: str) -> bool:
     """Check if the generated html documentation is up to date.
 
     Args:
@@ -76,20 +77,29 @@ class DocstringParser:
         arg_descs: A dict of argument names to their descriptions
     """
 
-    State = enum.Enum('State', ['short', 'desc', 'desc_hidden',
-                                'arg_start', 'arg_inside', 'misc'])
+    class State(enum.Enum):
 
-    def __init__(self, func):
+        """The current state of the parser."""
+
+        short = enum.auto()
+        desc = enum.auto()
+        desc_hidden = enum.auto()
+        arg_start = enum.auto()
+        arg_inside = enum.auto()
+        misc = enum.auto()
+
+    def __init__(self, func: Callable) -> None:
         """Constructor.
 
         Args:
             func: The function to parse the docstring for.
         """
         self._state = self.State.short
-        self._cur_arg_name = None
-        self._short_desc_parts = []
-        self._long_desc_parts = []
-        self.arg_descs = collections.OrderedDict()
+        self._cur_arg_name: Optional[str] = None
+        self._short_desc_parts: List[str] = []
+        self._long_desc_parts: List[str] = []
+        self.arg_descs: MutableMapping[
+            str, Union[str, List[str]]] = collections.OrderedDict()
         doc = inspect.getdoc(func)
         handlers = {
             self.State.short: self._parse_short,
@@ -121,25 +131,25 @@ class DocstringParser:
         self.long_desc = ' '.join(self._long_desc_parts)
         self.short_desc = ' '.join(self._short_desc_parts)
 
-    def _process_arg(self, line):
+    def _process_arg(self, line: str) -> None:
         """Helper method to process a line like 'fooarg: Blah blub'."""
         self._cur_arg_name, argdesc = line.split(':', maxsplit=1)
         self._cur_arg_name = self._cur_arg_name.strip().lstrip('*')
         self.arg_descs[self._cur_arg_name] = [argdesc.strip()]
 
-    def _skip(self, line):
+    def _skip(self, line: str) -> None:
         """Handler to ignore everything until we get 'Args:'."""
         if line.startswith('Args:'):
             self._state = self.State.arg_start
 
-    def _parse_short(self, line):
+    def _parse_short(self, line: str) -> None:
         """Parse the short description (first block) in the docstring."""
         if not line:
             self._state = self.State.desc
         else:
             self._short_desc_parts.append(line.strip())
 
-    def _parse_desc(self, line):
+    def _parse_desc(self, line: str) -> None:
         """Parse the long description in the docstring."""
         if line.startswith('Args:'):
             self._state = self.State.arg_start
@@ -148,22 +158,27 @@ class DocstringParser:
         elif line.strip():
             self._long_desc_parts.append(line.strip())
 
-    def _parse_arg_start(self, line):
+    def _parse_arg_start(self, line: str) -> None:
         """Parse first argument line."""
         self._process_arg(line)
         self._state = self.State.arg_inside
 
-    def _parse_arg_inside(self, line):
+    def _parse_arg_inside(self, line: str) -> bool:
         """Parse subsequent argument lines."""
         argname = self._cur_arg_name
+        assert argname is not None
+
+        descs = self.arg_descs[argname]
+        assert isinstance(descs, list)
+
         if re.fullmatch(r'[A-Z][a-z]+:', line):
-            if not self.arg_descs[argname][-1].strip():
-                self.arg_descs[argname] = self.arg_descs[argname][:-1]
+            if not descs[-1].strip():
+                del descs[-1]
                 return True
         elif not line.strip():
-            self.arg_descs[argname].append('\n\n')
+            descs.append('\n\n')
         elif line[4:].startswith(' '):
-            self.arg_descs[argname].append(line.strip() + '\n')
+            descs.append(line.strip() + '\n')
         else:
             self._process_arg(line)
         return False

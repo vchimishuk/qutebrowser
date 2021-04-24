@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,24 +15,19 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Functions that return config-related completion models."""
 
 from qutebrowser.config import configdata, configexc
 from qutebrowser.completion.models import completionmodel, listcategory, util
-from qutebrowser.commands import runners, cmdexc
+from qutebrowser.commands import parser, cmdexc
 from qutebrowser.keyinput import keyutils
 
 
 def option(*, info):
     """A CompletionModel filled with settings and their descriptions."""
-    model = completionmodel.CompletionModel(column_widths=(20, 70, 10))
-    options = ((opt.name, opt.description, info.config.get_str(opt.name))
-               for opt in configdata.DATA.values()
-               if not opt.no_autoconfig)
-    model.add_category(listcategory.ListCategory("Options", options))
-    return model
+    return _option(info, "Options", lambda opt: not opt.no_autoconfig)
 
 
 def customized_option(*, info):
@@ -44,6 +39,37 @@ def customized_option(*, info):
                if values)
     model.add_category(listcategory.ListCategory("Customized options",
                                                  options))
+    return model
+
+
+def list_option(*, info):
+    """A CompletionModel filled with settings whose values are lists."""
+    predicate = lambda opt: (isinstance(info.config.get_obj(opt.name),
+                                        list) and not opt.no_autoconfig)
+    return _option(info, "List options", predicate)
+
+
+def dict_option(*, info):
+    """A CompletionModel filled with settings whose values are dicts."""
+    predicate = lambda opt: (isinstance(info.config.get_obj(opt.name),
+                                        dict) and not opt.no_autoconfig)
+    return _option(info, "Dict options", predicate)
+
+
+def _option(info, title, predicate):
+    """A CompletionModel that is generated for several option sets.
+
+    Args:
+        info: The config info that can be passed through.
+        title: The title of the options.
+        predicate: The function for filtering out the options. Takes a single
+                   argument.
+    """
+    model = completionmodel.CompletionModel(column_widths=(20, 70, 10))
+    options = ((opt.name, opt.description, info.config.get_str(opt.name))
+               for opt in configdata.DATA.values()
+               if predicate(opt))
+    model.add_category(listcategory.ListCategory(title, options))
     return model
 
 
@@ -91,9 +117,8 @@ def _bind_current_default(key, info):
 
     cmd_text = info.keyconf.get_command(seq, 'normal')
     if cmd_text:
-        parser = runners.CommandParser()
         try:
-            cmd = parser.parse(cmd_text).cmd
+            cmd = parser.CommandParser().parse(cmd_text).cmd
         except cmdexc.NoSuchCommandError:
             data.append((cmd_text, '(Current) Invalid command!', key))
         else:
@@ -101,8 +126,7 @@ def _bind_current_default(key, info):
 
     cmd_text = info.keyconf.get_command(seq, 'normal', default=True)
     if cmd_text:
-        parser = runners.CommandParser()
-        cmd = parser.parse(cmd_text).cmd
+        cmd = parser.CommandParser().parse(cmd_text).cmd
         data.append((cmd_text, '(Default) {}'.format(cmd.desc), key))
 
     return data

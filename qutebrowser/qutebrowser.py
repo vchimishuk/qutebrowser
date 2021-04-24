@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Early initialization and main entry point.
 
@@ -51,7 +51,6 @@ except ImportError:
         sys.stderr.flush()
         sys.exit(100)
 check_python_version()
-from qutebrowser.utils import log
 
 import argparse  # pylint: disable=wrong-import-order
 from qutebrowser.misc import earlyinit
@@ -63,6 +62,8 @@ def get_argparser():
                                      description=qutebrowser.__description__)
     parser.add_argument('-B', '--basedir', help="Base directory for all "
                         "storage.")
+    parser.add_argument('-C', '--config-py', help="Path to config.py.",
+                        metavar='CONFIG')
     parser.add_argument('-V', '--version', help="Show version and quit.",
                         action='store_true')
     parser.add_argument('-s', '--set', help="Set a temporary setting for "
@@ -76,26 +77,31 @@ def get_argparser():
                         action='store_true')
     parser.add_argument('--target', choices=['auto', 'tab', 'tab-bg',
                                              'tab-silent', 'tab-bg-silent',
-                                             'window'],
+                                             'window', 'private-window'],
                         help="How URLs should be opened if there is already a "
                              "qutebrowser instance running.")
     parser.add_argument('--backend', choices=['webkit', 'webengine'],
                         help="Which backend to use.")
-    parser.add_argument('--enable-webengine-inspector', action='store_true',
-                        help="Enable the web inspector for QtWebEngine. Note "
-                        "that this is a SECURITY RISK and you should not "
-                        "visit untrusted websites with the inspector turned "
-                        "on. See https://bugreports.qt.io/browse/QTBUG-50725 "
-                        "for more details. This is not needed anymore since "
-                        "Qt 5.11 where the inspector is always enabled and "
-                        "secure.")
+    parser.add_argument('--desktop-file-name',
+                        default="org.qutebrowser.qutebrowser",
+                        help="Set the base name of the desktop entry for this "
+                        "application. Used to set the app_id under Wayland. See "
+                        "https://doc.qt.io/qt-5/qguiapplication.html#desktopFileName-prop")
 
     parser.add_argument('--json-args', help=argparse.SUPPRESS)
-    parser.add_argument('--temp-basedir-restarted', help=argparse.SUPPRESS)
+    parser.add_argument('--temp-basedir-restarted',
+                        help=argparse.SUPPRESS,
+                        action='store_true')
+
+    # WORKAROUND to be able to restart from older qutebrowser versions into this one.
+    # Should be removed at some point.
+    parser.add_argument('--enable-webengine-inspector',
+                        help=argparse.SUPPRESS,
+                        action='store_true')
 
     debug = parser.add_argument_group('debug arguments')
     debug.add_argument('-l', '--loglevel', dest='loglevel',
-                       help="Set loglevel", default='info',
+                       help="Override the configured console loglevel",
                        choices=['critical', 'error', 'warning', 'info',
                                 'debug', 'vdebug'])
     debug.add_argument('--logfilter', type=logfilter_error,
@@ -148,12 +154,12 @@ def logfilter_error(logfilter):
     Args:
         logfilter: A comma separated list of logger names.
     """
-    if set(logfilter.lstrip('!').split(',')).issubset(log.LOGGER_NAMES):
-        return logfilter
-    else:
-        raise argparse.ArgumentTypeError(
-            "filters: Invalid value {} - expected a list of: {}".format(
-                logfilter, ', '.join(log.LOGGER_NAMES)))
+    from qutebrowser.utils import log
+    try:
+        log.LogFilter.parse(logfilter)
+    except log.InvalidLogFilterError as e:
+        raise argparse.ArgumentTypeError(e)
+    return logfilter
 
 
 def debug_flag_error(flag):
@@ -165,9 +171,21 @@ def debug_flag_error(flag):
         no-sql-history: Don't store history items.
         no-scroll-filtering: Process all scrolling updates.
         log-requests: Log all network requests.
+        log-cookies: Log cookies in cookie filter.
+        log-scroll-pos: Log all scrolling changes.
+        log-sensitive-keys: Log keypresses in passthrough modes.
+        stack: Enable Chromium stack logging.
+        chromium: Enable Chromium logging.
+        wait-renderer-process: Wait for debugger in renderer process.
+        avoid-chromium-init: Enable `--version` without initializing Chromium.
+        werror: Turn Python warnings into errors.
+        test-notification-service: Use the testing libnotify service.
     """
     valid_flags = ['debug-exit', 'pdb-postmortem', 'no-sql-history',
-                   'no-scroll-filtering', 'log-requests', 'lost-focusproxy']
+                   'no-scroll-filtering', 'log-requests', 'log-cookies',
+                   'log-scroll-pos', 'log-sensitive-keys', 'stack', 'chromium',
+                   'wait-renderer-process', 'avoid-chromium-init', 'werror',
+                   'test-notification-service']
 
     if flag in valid_flags:
         return flag
@@ -176,17 +194,25 @@ def debug_flag_error(flag):
                                          .format(', '.join(valid_flags)))
 
 
+def _unpack_json_args(args):
+    """Restore arguments from --json-args after a restart.
+
+    When restarting, we serialize the argparse namespace into json, and
+    construct a "fake" argparse.Namespace here based on the data loaded
+    from json.
+    """
+    new_args = vars(args)
+    data = json.loads(args.json_args)
+    new_args.update(data)
+    return argparse.Namespace(**new_args)
+
+
 def main():
     parser = get_argparser()
     argv = sys.argv[1:]
     args = parser.parse_args(argv)
     if args.json_args is not None:
-        # Restoring after a restart.
-        # When restarting, we serialize the argparse namespace into json, and
-        # construct a "fake" argparse.Namespace here based on the data loaded
-        # from json.
-        data = json.loads(args.json_args)
-        args = argparse.Namespace(**data)
+        args = _unpack_json_args(args)
     earlyinit.early_init(args)
     # We do this imports late as earlyinit needs to be run first (because of
     # version checking and other early initialization)

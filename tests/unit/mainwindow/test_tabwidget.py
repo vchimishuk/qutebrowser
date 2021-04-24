@@ -1,5 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
+# Copyright 2015-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 # Copyright 2015-2018 Daniel Schadt
 #
 # This file is part of qutebrowser.
@@ -15,7 +16,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Tests for the custom TabWidget/TabBar."""
 
@@ -35,7 +36,7 @@ class TestTabWidget:
     @pytest.fixture
     def widget(self, qtbot, monkeypatch, config_stub):
         w = tabwidget.TabWidget(0)
-        qtbot.addWidget(w)
+        qtbot.add_widget(w)
         monkeypatch.setattr(tabwidget.objects, 'backend',
                             usertypes.Backend.QtWebKit)
         w.show()
@@ -52,7 +53,7 @@ class TestTabWidget:
         tab = fake_web_tab()
         widget.addTab(tab, icon, 'foobar')
 
-        with qtbot.waitExposed(widget):
+        with qtbot.wait_exposed(widget):
             widget.show()
 
     # Sizing tests
@@ -84,7 +85,7 @@ class TestTabWidget:
             widget.addTab(fake_web_tab(), 'foobar' + str(i))
 
         # Set pinned title format longer than unpinned
-        config_stub.val.tabs.title.format_pinned = "_" * 20
+        config_stub.val.tabs.title.format_pinned = "_" * 10
         config_stub.val.tabs.title.format = "_" * 2
         config_stub.val.tabs.pinned.shrink = shrink_pinned
         if vertical:
@@ -93,8 +94,9 @@ class TestTabWidget:
             config_stub.val.tabs.position = "left"
 
         pinned_num = [1, num_tabs - 1]
-        for tab in pinned_num:
-            widget.set_tab_pinned(widget.widget(tab), True)
+        for num in pinned_num:
+            tab = widget.widget(num)
+            tab.set_pinned(True)
 
         first_size = widget.tabBar().tabSizeHint(0)
         first_size_min = widget.tabBar().minimumTabSizeHint(0)
@@ -116,7 +118,7 @@ class TestTabWidget:
         for i in range(num_tabs):
             widget.addTab(fake_web_tab(), 'foobar' + str(i))
 
-        with qtbot.waitExposed(widget):
+        with qtbot.wait_exposed(widget):
             widget.show()
 
         benchmark(widget.update_tab_titles)
@@ -134,7 +136,15 @@ class TestTabWidget:
         config_stub.val.tabs.max_width = max_size
         assert widget.tabBar().tabRect(0).width() == max_size
 
-    @pytest.mark.parametrize("num_tabs", [4, 100])
+    def test_tab_stays_hidden(self, widget, fake_web_tab, config_stub):
+        assert widget.tabBar().isVisible()
+        config_stub.val.tabs.show = "never"
+        assert not widget.tabBar().isVisible()
+        for i in range(12):
+            widget.addTab(fake_web_tab(), 'foobar' + str(i))
+        assert not widget.tabBar().isVisible()
+
+    @pytest.mark.parametrize("num_tabs", [4, 70])
     @pytest.mark.parametrize("rev", [True, False])
     def test_add_remove_tab_benchmark(self, benchmark, widget,
                                       qtbot, fake_web_tab, num_tabs, rev):

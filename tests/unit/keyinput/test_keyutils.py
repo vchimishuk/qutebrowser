@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 import operator
 
@@ -26,7 +26,7 @@ from PyQt5.QtCore import Qt, QEvent, pyqtSignal
 from PyQt5.QtGui import QKeyEvent, QKeySequence
 from PyQt5.QtWidgets import QWidget
 
-from tests.unit.keyinput import key_data
+from unit.keyinput import key_data
 from qutebrowser.keyinput import keyutils
 from qutebrowser.utils import utils
 
@@ -158,12 +158,62 @@ class TestKeyToString:
     (Qt.Key_A,
      Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier | Qt.ShiftModifier,
      '<Meta+Ctrl+Alt+Shift+a>'),
+    (ord('Œ'), Qt.NoModifier, '<Œ>'),
+    (ord('Œ'), Qt.ShiftModifier, '<Shift+Œ>'),
+    (ord('Œ'), Qt.GroupSwitchModifier, '<AltGr+Œ>'),
+    (ord('Œ'), Qt.GroupSwitchModifier | Qt.ShiftModifier, '<AltGr+Shift+Œ>'),
 
     (Qt.Key_Shift, Qt.ShiftModifier, '<Shift>'),
     (Qt.Key_Shift, Qt.ShiftModifier | Qt.ControlModifier, '<Ctrl+Shift>'),
+    (Qt.Key_Alt, Qt.AltModifier, '<Alt>'),
+    (Qt.Key_Shift, Qt.GroupSwitchModifier | Qt.ShiftModifier, '<AltGr+Shift>'),
+    (Qt.Key_AltGr, Qt.GroupSwitchModifier, '<AltGr>'),
 ])
 def test_key_info_str(key, modifiers, expected):
     assert str(keyutils.KeyInfo(key, modifiers)) == expected
+
+
+@pytest.mark.parametrize('info1, info2, equal', [
+    (keyutils.KeyInfo(Qt.Key_A, Qt.NoModifier),
+     keyutils.KeyInfo(Qt.Key_A, Qt.NoModifier),
+     True),
+    (keyutils.KeyInfo(Qt.Key_A, Qt.NoModifier),
+     keyutils.KeyInfo(Qt.Key_B, Qt.NoModifier),
+     False),
+    (keyutils.KeyInfo(Qt.Key_A, Qt.NoModifier),
+     keyutils.KeyInfo(Qt.Key_B, Qt.ControlModifier),
+     False),
+])
+def test_hash(info1, info2, equal):
+    assert (hash(info1) == hash(info2)) == equal
+
+
+@pytest.mark.parametrize('key, modifiers, text, expected', [
+    (0xd83c, Qt.NoModifier, '🏻', '<🏻>'),
+    (0xd867, Qt.NoModifier, '𩷶', '<𩷶>'),
+    (0xd867, Qt.ShiftModifier, '𩷶', '<Shift+𩷶>'),
+])
+def test_surrogates(key, modifiers, text, expected):
+    evt = QKeyEvent(QKeyEvent.KeyPress, key, modifiers, text)
+    assert str(keyutils.KeyInfo.from_event(evt)) == expected
+
+
+@pytest.mark.parametrize('keys, expected', [
+    ([0x1f3fb], '<🏻>'),
+    ([0x29df6], '<𩷶>'),
+    ([Qt.Key_Shift, 0x29df6], '<Shift><𩷶>'),
+    ([0x1f468, 0x200d, 0x1f468, 0x200d, 0x1f466], '<👨><‍><👨><‍><👦>'),
+])
+def test_surrogate_sequences(keys, expected):
+    seq = keyutils.KeySequence(*keys)
+    assert str(seq) == expected
+
+
+# This shouldn't happen, but if it does we should handle it well
+def test_surrogate_error():
+    evt = QKeyEvent(QKeyEvent.KeyPress, 0xd83e, Qt.NoModifier, '🤞🏻')
+    with pytest.raises(keyutils.KeyParseError):
+        keyutils.KeyInfo.from_event(evt)
 
 
 @pytest.mark.parametrize('keystr, expected', [
@@ -206,14 +256,19 @@ class TestKeySequence:
         seq = keyutils.KeySequence()
         assert not seq
 
-    @pytest.mark.parametrize('key', [Qt.Key_unknown, -1, '\x1f', 0])
+    @pytest.mark.parametrize('key', [Qt.Key_unknown, -1, 0])
     def test_init_unknown(self, key):
         with pytest.raises(keyutils.KeyParseError):
             keyutils.KeySequence(key)
 
+    def test_parse_unknown(self):
+        with pytest.raises(keyutils.KeyParseError):
+            keyutils.KeySequence.parse('\x1f')
+
     @pytest.mark.parametrize('orig, normalized', [
         ('<Control+x>', '<Ctrl+x>'),
         ('<Windows+x>', '<Meta+x>'),
+        ('<Super+x>', '<Meta+x>'),
         ('<Mod4+x>', '<Meta+x>'),
         ('<Command+x>', '<Meta+x>'),
         ('<Cmd+x>', '<Meta+x>'),
@@ -277,6 +332,14 @@ class TestKeySequence:
         }
         assert opposite[op](seq1, seq2) != result
 
+    @pytest.mark.parametrize('op, result', [
+        (operator.eq, False),
+        (operator.ne, True),
+    ])
+    def test_operators_other_type(self, op, result):
+        seq = keyutils.KeySequence.parse('a')
+        assert op(seq, 'x') == result
+
     @pytest.mark.parametrize('seq1, seq2, equal', [
         ('a', 'a', True),
         ('a', 'A', False),
@@ -317,7 +380,7 @@ class TestKeySequence:
         assert s1[3:5] == s2
         assert seq[3:5] == expected
 
-    @pytest.mark.parametrize('entered, configured, expected', [
+    MATCH_TESTS = [
         # config: abcd
         ('abc', 'abcd', QKeySequence.PartialMatch),
         ('abcd', 'abcd', QKeySequence.ExactMatch),
@@ -339,12 +402,13 @@ class TestKeySequence:
         # empty strings
         ('', '', QKeySequence.ExactMatch),
         ('', 'a', QKeySequence.PartialMatch),
-        ('a', '', QKeySequence.NoMatch),
-    ])
-    def test_matches(self, entered, configured, expected):
+        ('a', '', QKeySequence.NoMatch)]
+
+    @pytest.mark.parametrize('entered, configured, match_type', MATCH_TESTS)
+    def test_matches(self, entered, configured, match_type):
         entered = keyutils.KeySequence.parse(entered)
         configured = keyutils.KeySequence.parse(configured)
-        assert entered.matches(configured) == expected
+        assert entered.matches(configured) == match_type
 
     @pytest.mark.parametrize('old, key, modifiers, text, expected', [
         ('a', Qt.Key_B, Qt.NoModifier, 'b', 'ab'),
@@ -395,11 +459,11 @@ class TestKeySequence:
          Qt.ControlModifier | Qt.ShiftModifier),
         (Qt.ShiftModifier, Qt.ShiftModifier),
     ])
-    def test_fake_mac(self, fake_keyevent, modifiers, expected):
+    def test_fake_mac(self, modifiers, expected):
         """Make sure Control/Meta are swapped with a simulated Mac."""
         seq = keyutils.KeySequence()
-        event = fake_keyevent(key=Qt.Key_A, modifiers=modifiers)
-        new = seq.append_event(event)
+        info = keyutils.KeyInfo(key=Qt.Key_A, modifiers=modifiers)
+        new = seq.append_event(info.to_event())
         assert new[0] == keyutils.KeyInfo(Qt.Key_A, expected)
 
     @pytest.mark.parametrize('key', [Qt.Key_unknown, 0x0])
@@ -418,11 +482,18 @@ class TestKeySequence:
                                         Qt.Key_A | Qt.ControlModifier)
         assert seq.strip_modifiers() == expected
 
-    def test_with_mappings(self):
-        seq = keyutils.KeySequence.parse('foobar')
-        mappings = {keyutils.KeySequence('b'): keyutils.KeySequence('t')}
-        seq2 = seq.with_mappings(mappings)
-        assert seq2 == keyutils.KeySequence.parse('footar')
+    @pytest.mark.parametrize('inp, mappings, expected', [
+        ('foobar', {'b': 't'}, 'footar'),
+        ('foo<Ctrl+x>bar', {'<Ctrl+x>': '<Ctrl+y>'}, 'foo<Ctrl+y>bar'),
+        ('foobar', {'b': 'sa'}, 'foosaar'),
+    ])
+    def test_with_mappings(self, inp, mappings, expected):
+        seq = keyutils.KeySequence.parse(inp)
+        seq2 = seq.with_mappings({
+            keyutils.KeySequence.parse(k): keyutils.KeySequence.parse(v)
+            for k, v in mappings.items()
+        })
+        assert seq2 == keyutils.KeySequence.parse(expected)
 
     @pytest.mark.parametrize('keystr, expected', [
         ('<Ctrl-Alt-y>',
@@ -520,8 +591,13 @@ def test_is_printable(key, printable):
     (Qt.Key_Escape, Qt.ControlModifier, True),
     (Qt.Key_X, Qt.ControlModifier, True),
     (Qt.Key_X, Qt.NoModifier, False),
-    (Qt.Key_2, Qt.KeypadModifier, False),
+    (Qt.Key_2, Qt.KeypadModifier, True),
     (Qt.Key_2, Qt.NoModifier, False),
+    (Qt.Key_Shift, Qt.ShiftModifier, True),
+    (Qt.Key_Control, Qt.ControlModifier, True),
+    (Qt.Key_Alt, Qt.AltModifier, True),
+    (Qt.Key_Meta, Qt.MetaModifier, True),
+    (Qt.Key_Mode_switch, Qt.GroupSwitchModifier, True),
 ])
 def test_is_special(key, modifiers, special):
     assert keyutils.is_special(key, modifiers) == special

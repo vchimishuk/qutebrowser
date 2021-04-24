@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Loggers and utilities related to logging."""
 
@@ -31,6 +31,9 @@ import traceback
 import warnings
 import json
 import inspect
+import argparse
+from typing import (TYPE_CHECKING, Any, Iterator, Mapping, MutableSequence,
+                    Optional, Set, Tuple, Union, cast)
 
 from PyQt5 import QtCore
 # Optional imports
@@ -38,6 +41,9 @@ try:
     import colorama
 except ImportError:
     colorama = None
+
+if TYPE_CHECKING:
+    from qutebrowser.config import config as configmodule
 
 _log_inited = False
 _args = None
@@ -75,13 +81,14 @@ LOG_COLORS = {
 }
 
 # We first monkey-patch logging to support our VDEBUG level before getting the
-# loggers.  Based on http://stackoverflow.com/a/13638084
+# loggers.  Based on https://stackoverflow.com/a/13638084
+# mypy doesn't know about this, so we need to ignore it.
 VDEBUG_LEVEL = 9
 logging.addLevelName(VDEBUG_LEVEL, 'VDEBUG')
-logging.VDEBUG = VDEBUG_LEVEL
+logging.VDEBUG = VDEBUG_LEVEL  # type: ignore[attr-defined]
 
 LOG_LEVELS = {
-    'VDEBUG': logging.VDEBUG,
+    'VDEBUG': logging.VDEBUG,  # type: ignore[attr-defined]
     'DEBUG': logging.DEBUG,
     'INFO': logging.INFO,
     'WARNING': logging.WARNING,
@@ -89,19 +96,11 @@ LOG_LEVELS = {
     'CRITICAL': logging.CRITICAL,
 }
 
-LOGGER_NAMES = [
-    'statusbar', 'completion', 'init', 'url',
-    'destroy', 'modes', 'webview', 'misc',
-    'mouse', 'procs', 'hints', 'keyboard',
-    'commands', 'signals', 'downloads',
-    'js', 'qt', 'rfc6266', 'ipc', 'shlexer',
-    'save', 'message', 'config', 'sessions',
-    'webelem', 'prompt', 'network', 'sql',
-    'greasemonkey'
-]
 
-
-def vdebug(self, msg, *args, **kwargs):
+def vdebug(self: logging.Logger,
+           msg: str,
+           *args: Any,
+           **kwargs: Any) -> None:
     """Log with a VDEBUG level.
 
     VDEBUG is used when a debug message is rather verbose, and probably of
@@ -114,7 +113,7 @@ def vdebug(self, msg, *args, **kwargs):
         # pylint: enable=protected-access
 
 
-logging.Logger.vdebug = vdebug
+logging.Logger.vdebug = vdebug  # type: ignore[attr-defined]
 
 
 # The different loggers used.
@@ -135,7 +134,6 @@ keyboard = logging.getLogger('keyboard')
 downloads = logging.getLogger('downloads')
 js = logging.getLogger('js')  # Javascript console messages
 qt = logging.getLogger('qt')  # Warnings produced by Qt
-rfc6266 = logging.getLogger('rfc6266')
 ipc = logging.getLogger('ipc')
 shlexer = logging.getLogger('shlexer')
 save = logging.getLogger('save')
@@ -147,14 +145,26 @@ prompt = logging.getLogger('prompt')
 network = logging.getLogger('network')
 sql = logging.getLogger('sql')
 greasemonkey = logging.getLogger('greasemonkey')
+extensions = logging.getLogger('extensions')
+
+LOGGER_NAMES = [
+    'statusbar', 'completion', 'init', 'url',
+    'destroy', 'modes', 'webview', 'misc',
+    'mouse', 'procs', 'hints', 'keyboard',
+    'commands', 'signals', 'downloads',
+    'js', 'qt', 'ipc', 'shlexer',
+    'save', 'message', 'config', 'sessions',
+    'webelem', 'prompt', 'network', 'sql',
+    'greasemonkey', 'extensions',
+]
 
 
-ram_handler = None
-console_handler = None
+ram_handler: Optional['RAMHandler'] = None
+console_handler: Optional[logging.Handler] = None
 console_filter = None
 
 
-def stub(suffix=''):
+def stub(suffix: str = '') -> None:
     """Show a STUB: message for the calling function."""
     try:
         function = inspect.stack()[1][3]
@@ -167,9 +177,9 @@ def stub(suffix=''):
     misc.warning(text)
 
 
-def init_log(args):
+def init_log(args: argparse.Namespace) -> None:
     """Init loggers based on the argparse namespace passed."""
-    level = args.loglevel.upper()
+    level = (args.loglevel or "info").upper()
     try:
         numeric_level = getattr(logging, level)
     except AttributeError:
@@ -183,42 +193,47 @@ def init_log(args):
     root = logging.getLogger()
     global console_filter
     if console is not None:
-        if not args.logfilter:
-            negate = False
-            names = None
-        elif args.logfilter.startswith('!'):
-            negate = True
-            names = args.logfilter[1:].split(',')
-        else:
-            negate = False
-            names = args.logfilter.split(',')
-        console_filter = LogFilter(names, negate)
+        console_filter = LogFilter.parse(args.logfilter)
         console.addFilter(console_filter)
         root.addHandler(console)
     if ram is not None:
         root.addHandler(ram)
+    else:
+        # If we add no handler, we shouldn't process non visible logs at all
+        #
+        # disable blocks the current level (while setHandler shows the current
+        # level), so -1 to avoid blocking handled messages.
+        logging.disable(numeric_level - 1)
+
+    global _log_inited, _args
+    _args = args
     root.setLevel(logging.NOTSET)
     logging.captureWarnings(True)
     _init_py_warnings()
     QtCore.qInstallMessageHandler(qt_message_handler)
-    global _log_inited, _args
     _log_inited = True
-    _args = args
 
 
-def _init_py_warnings():
+@QtCore.pyqtSlot()
+def shutdown_log() -> None:
+    QtCore.qInstallMessageHandler(None)
+
+
+def _init_py_warnings() -> None:
     """Initialize Python warning handling."""
-    warnings.simplefilter('default')
+    assert _args is not None
+    warnings.simplefilter('error' if 'werror' in _args.debug_flags
+                          else 'default')
     warnings.filterwarnings('ignore', module='pdb', category=ResourceWarning)
     # This happens in many qutebrowser dependencies...
     warnings.filterwarnings('ignore', category=DeprecationWarning,
-                            message="Using or importing the ABCs from "
-                            "'collections' instead of from 'collections.abc' "
-                            "is deprecated, and in 3.8 it will stop working")
+                            message=r"Using or importing the ABCs from "
+                            r"'collections' instead of from 'collections.abc' "
+                            r"is deprecated.*")
 
 
 @contextlib.contextmanager
-def disable_qt_msghandler():
+def disable_qt_msghandler() -> Iterator[None]:
     """Contextmanager which temporarily disables the Qt message handler."""
     old_handler = QtCore.qInstallMessageHandler(None)
     try:
@@ -228,15 +243,21 @@ def disable_qt_msghandler():
 
 
 @contextlib.contextmanager
-def ignore_py_warnings(**kwargs):
+def py_warning_filter(action: str = 'ignore', **kwargs: Any) -> Iterator[None]:
     """Contextmanager to temporarily disable certain Python warnings."""
-    warnings.filterwarnings('ignore', **kwargs)
+    warnings.filterwarnings(action, **kwargs)
     yield
     if _log_inited:
         _init_py_warnings()
 
 
-def _init_handlers(level, color, force_color, json_logging, ram_capacity):
+def _init_handlers(
+        level: int,
+        color: bool,
+        force_color: bool,
+        json_logging: bool,
+        ram_capacity: int
+) -> Tuple[logging.StreamHandler, Optional['RAMHandler']]:
     """Init log handlers.
 
     Args:
@@ -251,7 +272,7 @@ def _init_handlers(level, color, force_color, json_logging, ram_capacity):
         level, color, force_color, json_logging)
 
     if sys.stderr is None:
-        console_handler = None
+        console_handler = None  # type: ignore[unreachable]
     else:
         strip = False if force_color else None
         if use_colorama:
@@ -266,14 +287,14 @@ def _init_handlers(level, color, force_color, json_logging, ram_capacity):
         ram_handler = None
     else:
         ram_handler = RAMHandler(capacity=ram_capacity)
-        ram_handler.setLevel(logging.NOTSET)
+        ram_handler.setLevel(logging.DEBUG)
         ram_handler.setFormatter(ram_fmt)
         ram_handler.html_formatter = html_fmt
 
     return console_handler, ram_handler
 
 
-def get_console_format(level):
+def get_console_format(level: int) -> str:
     """Get the log format the console logger should use.
 
     Args:
@@ -285,7 +306,13 @@ def get_console_format(level):
     return EXTENDED_FMT if level <= logging.DEBUG else SIMPLE_FMT
 
 
-def _init_formatters(level, color, force_color, json_logging):
+def _init_formatters(
+        level: int,
+        color: bool,
+        force_color: bool,
+        json_logging: bool
+) -> Tuple[Union['JSONFormatter', 'ColoredFormatter'],
+           'ColoredFormatter', 'HTMLFormatter', bool]:
     """Init log formatters.
 
     Args:
@@ -304,14 +331,17 @@ def _init_formatters(level, color, force_color, json_logging):
                                      use_colors=False)
     html_formatter = HTMLFormatter(EXTENDED_FMT_HTML, DATEFMT,
                                    log_colors=LOG_COLORS)
-    if sys.stderr is None:
-        return None, ram_formatter, html_formatter, False
-
-    if json_logging:
-        console_formatter = JSONFormatter()
-        return console_formatter, ram_formatter, html_formatter, False
 
     use_colorama = False
+
+    if sys.stderr is None:
+        console_formatter = None  # type: ignore[unreachable]
+        return console_formatter, ram_formatter, html_formatter, use_colorama
+
+    if json_logging:
+        json_formatter = JSONFormatter()
+        return json_formatter, ram_formatter, html_formatter, use_colorama
+
     color_supported = os.name == 'posix' or colorama
 
     if color_supported and (sys.stderr.isatty() or force_color) and color:
@@ -326,24 +356,24 @@ def _init_formatters(level, color, force_color, json_logging):
     return console_formatter, ram_formatter, html_formatter, use_colorama
 
 
-def change_console_formatter(level):
+def change_console_formatter(level: int) -> None:
     """Change console formatter based on level.
 
     Args:
         level: The numeric logging level
     """
-    if not isinstance(console_handler.formatter, ColoredFormatter):
-        # JSON Formatter being used for end2end tests
-        pass
+    assert console_handler is not None
 
-    use_colors = console_handler.formatter.use_colors
+    old_formatter = cast(ColoredFormatter, console_handler.formatter)
     console_fmt = get_console_format(level)
     console_formatter = ColoredFormatter(console_fmt, DATEFMT, '{',
-                                         use_colors=use_colors)
+                                         use_colors=old_formatter.use_colors)
     console_handler.setFormatter(console_formatter)
 
 
-def qt_message_handler(msg_type, context, msg):
+def qt_message_handler(msg_type: QtCore.QtMsgType,
+                       context: QtCore.QMessageLogContext,
+                       msg: str) -> None:
     """Qt message handler to redirect qWarning etc. to the logging system.
 
     Args:
@@ -363,7 +393,9 @@ def qt_message_handler(msg_type, context, msg):
     try:
         qt_to_logging[QtCore.QtInfoMsg] = logging.INFO
     except AttributeError:
-        # While we don't support Qt < 5.5 anymore, logging still needs to work
+        # Added in Qt 5.5.
+        # While we don't support Qt < 5.5 anymore, logging still needs to work so that
+        # the Qt version warning in earlyinit.py does.
         pass
 
     # Change levels of some well-known messages to debug so they don't get
@@ -426,6 +458,9 @@ def qt_message_handler(msg_type, context, msg):
         'QXcbWindow: Unhandled client message: ""',
         # https://codereview.qt-project.org/176831
         "QObject::disconnect: Unexpected null parameter",
+        # https://bugreports.qt.io/browse/QTBUG-76391
+        "Attribute Qt::AA_ShareOpenGLContexts must be set before "
+        "QCoreApplication is created.",
     ]
     # not using utils.is_mac here, because we can't be sure we can successfully
     # import the utils module here.
@@ -444,8 +479,13 @@ def qt_message_handler(msg_type, context, msg):
     else:
         level = qt_to_logging[msg_type]
 
+    if context.line is None:
+        lineno = -1  # type: ignore[unreachable]
+    else:
+        lineno = context.line
+
     if context.function is None:
-        func = 'none'
+        func = 'none'  # type: ignore[unreachable]
     elif ':' in context.function:
         func = '"{}"'.format(context.function)
     else:
@@ -463,17 +503,20 @@ def qt_message_handler(msg_type, context, msg):
                 "    pacman -S libxkbcommon-x11")
         faulthandler.disable()
 
+    assert _args is not None
     if _args.debug:
-        stack = ''.join(traceback.format_stack())
+        stack: Optional[str] = ''.join(traceback.format_stack())
     else:
         stack = None
-    record = qt.makeRecord(name, level, context.file, context.line, msg, None,
-                           None, func, sinfo=stack)
+
+    record = qt.makeRecord(name=name, level=level, fn=context.file, lno=lineno,
+                           msg=msg, args=(), exc_info=None, func=func,
+                           sinfo=stack)
     qt.handle(record)
 
 
 @contextlib.contextmanager
-def hide_qt_warning(pattern, logger='qt'):
+def hide_qt_warning(pattern: str, logger: str = 'qt') -> Iterator[None]:
     """Hide Qt warnings matching the given regex."""
     log_filter = QtWarningFilter(pattern)
     logger_obj = logging.getLogger(logger)
@@ -484,6 +527,36 @@ def hide_qt_warning(pattern, logger='qt'):
         logger_obj.removeFilter(log_filter)
 
 
+def init_from_config(conf: 'configmodule.ConfigContainer') -> None:
+    """Initialize logging settings from the config.
+
+    init_log is called before the config module is initialized, so config-based
+    initialization cannot be performed there.
+
+    Args:
+        conf: The global ConfigContainer.
+              This is passed rather than accessed via the module to avoid a
+              cyclic import.
+    """
+    assert _args is not None
+    if _args.debug:
+        init.debug("--debug flag overrides log configs")
+        return
+    if ram_handler:
+        ramlevel = conf.logging.level.ram
+        init.debug("Configuring RAM loglevel to %s", ramlevel)
+        ram_handler.setLevel(LOG_LEVELS[ramlevel.upper()])
+    if console_handler:
+        consolelevel = conf.logging.level.console
+        if _args.loglevel:
+            init.debug("--loglevel flag overrides logging.level.console")
+        else:
+            init.debug("Configuring console loglevel to %s", consolelevel)
+            level = LOG_LEVELS[consolelevel.upper()]
+            console_handler.setLevel(level)
+            change_console_formatter(level)
+
+
 class QtWarningFilter(logging.Filter):
 
     """Filter to filter Qt warnings.
@@ -492,14 +565,25 @@ class QtWarningFilter(logging.Filter):
         _pattern: The start of the message.
     """
 
-    def __init__(self, pattern):
+    def __init__(self, pattern: str) -> None:
         super().__init__()
         self._pattern = pattern
 
-    def filter(self, record):
+    def filter(self, record: logging.LogRecord) -> bool:
         """Determine if the specified record is to be logged."""
         do_log = not record.msg.strip().startswith(self._pattern)
         return do_log
+
+
+class InvalidLogFilterError(Exception):
+
+    """Raised when an invalid filter string is passed to LogFilter.parse()."""
+
+    def __init__(self, names: Set[str]):
+        invalid = names - set(LOGGER_NAMES)
+        super().__init__("Invalid log category {} - valid categories: {}"
+                         .format(', '.join(sorted(invalid)),
+                                 ', '.join(LOGGER_NAMES)))
 
 
 class LogFilter(logging.Filter):
@@ -510,29 +594,58 @@ class LogFilter(logging.Filter):
     comma-separated list instead.
 
     Attributes:
-        names: A list of record names to filter.
-        negated: Whether names is a list of records to log or to suppress.
+        names: A set of logging names to allow.
+        negated: Whether names is a set of names to log or to suppress.
+        only_debug: Only filter debug logs, always show anything more important
+                    than debug.
     """
 
-    def __init__(self, names, negate=False):
+    def __init__(self, names: Set[str], *, negated: bool = False,
+                 only_debug: bool = True) -> None:
         super().__init__()
         self.names = names
-        self.negated = negate
+        self.negated = negated
+        self.only_debug = only_debug
 
-    def filter(self, record):
+    @classmethod
+    def parse(cls, filter_str: Optional[str], *,
+              only_debug: bool = True) -> 'LogFilter':
+        """Parse a log filter from a string."""
+        if filter_str is None or filter_str == 'none':
+            names = set()
+            negated = False
+        else:
+            filter_str = filter_str.lower()
+
+            if filter_str.startswith('!'):
+                negated = True
+                filter_str = filter_str[1:]
+            else:
+                negated = False
+
+            names = {e.strip() for e in filter_str.split(',')}
+
+        if not names.issubset(LOGGER_NAMES):
+            raise InvalidLogFilterError(names)
+
+        return cls(names=names, negated=negated, only_debug=only_debug)
+
+    def update_from(self, other: 'LogFilter') -> None:
+        """Update this filter's properties from another filter."""
+        self.names = other.names
+        self.negated = other.negated
+        self.only_debug = other.only_debug
+
+    def filter(self, record: logging.LogRecord) -> bool:
         """Determine if the specified record is to be logged."""
-        if self.names is None:
+        if not self.names:
+            # No filter
             return True
-        if record.levelno > logging.DEBUG:
+        elif record.levelno > logging.DEBUG and self.only_debug:
             # More important than DEBUG, so we won't filter at all
             return True
-        for name in self.names:
-            if record.name == name:
-                return not self.negated
-            elif not record.name.startswith(name):
-                continue
-            elif record.name[len(name)] == '.':
-                return not self.negated
+        elif record.name.split('.')[0] in self.names:
+            return not self.negated
         return self.negated
 
 
@@ -547,38 +660,54 @@ class RAMHandler(logging.Handler):
         _data: A deque containing the logging records.
     """
 
-    def __init__(self, capacity):
+    def __init__(self, capacity: int) -> None:
         super().__init__()
-        self.html_formatter = None
+        self.html_formatter: Optional[HTMLFormatter] = None
         if capacity != -1:
-            self._data = collections.deque(maxlen=capacity)
+            self._data: MutableSequence[logging.LogRecord] = collections.deque(
+                maxlen=capacity
+            )
         else:
             self._data = collections.deque()
 
-    def emit(self, record):
-        if record.levelno >= logging.DEBUG:
-            # We don't log VDEBUG to RAM.
-            self._data.append(record)
+    def emit(self, record: logging.LogRecord) -> None:
+        self._data.append(record)
 
-    def dump_log(self, html=False, level='vdebug'):
+    def dump_log(self, html: bool = False, level: str = 'vdebug',
+                 logfilter: LogFilter = None) -> str:
         """Dump the complete formatted log data as string.
 
-        FIXME: We should do all the HTML formatter via jinja2.
+        FIXME: We should do all the HTML formatting via jinja2.
         (probably obsolete when moving to a widget for logging,
         https://github.com/qutebrowser/qutebrowser/issues/34
+
+        Args:
+            html: Produce HTML rather than plaintext output.
+            level: The minimal loglevel to show.
+            logfilter: A LogFilter instance used to filter log lines.
         """
         minlevel = LOG_LEVELS.get(level.upper(), VDEBUG_LEVEL)
-        fmt = self.html_formatter.format if html else self.format
+
+        if logfilter is None:
+            logfilter = LogFilter(set())
+
+        if html:
+            assert self.html_formatter is not None
+            fmt = self.html_formatter.format
+        else:
+            fmt = self.format
+
         self.acquire()
         try:
             lines = [fmt(record)
                      for record in self._data
-                     if record.levelno >= minlevel]
+                     if record.levelno >= minlevel and
+                     logfilter.filter(record)]
         finally:
             self.release()
         return '\n'.join(lines)
 
-    def change_log_capacity(self, capacity):
+    def change_log_capacity(self, capacity: int) -> None:
         self._data = collections.deque(self._data, maxlen=capacity)
 
 
@@ -590,11 +719,14 @@ class ColoredFormatter(logging.Formatter):
         use_colors: Whether to do colored logging or not.
     """
 
-    def __init__(self, fmt, datefmt, style, *, use_colors):
+    def __init__(self, fmt: str,
+                 datefmt: str,
+                 style: str, *,
+                 use_colors: bool) -> None:
         super().__init__(fmt, datefmt, style)
         self.use_colors = use_colors
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         if self.use_colors:
             color_dict = dict(COLOR_ESCAPES)
             color_dict['reset'] = RESET_ESCAPE
@@ -617,7 +749,7 @@ class HTMLFormatter(logging.Formatter):
         _colordict: The colordict passed to the logger.
     """
 
-    def __init__(self, fmt, datefmt, log_colors):
+    def __init__(self, fmt: str, datefmt: str, log_colors: Mapping[str, str]) -> None:
         """Constructor.
 
         Args:
@@ -626,22 +758,23 @@ class HTMLFormatter(logging.Formatter):
             log_colors: The colors to use for logging levels.
         """
         super().__init__(fmt, datefmt)
-        self._log_colors = log_colors
-        self._colordict = {}
+        self._log_colors: Mapping[str, str] = log_colors
+        self._colordict: Mapping[str, str] = {}
         # We could solve this nicer by using CSS, but for this simple case this
         # works.
         for color in COLORS:
             self._colordict[color] = '<font color="{}">'.format(color)
         self._colordict['reset'] = '</font>'
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         record_clone = copy.copy(record)
         record_clone.__dict__.update(self._colordict)
         if record_clone.levelname in self._log_colors:
             color = self._log_colors[record_clone.levelname]
-            record_clone.log_color = self._colordict[color]
+            color_str = self._colordict[color]
+            record_clone.log_color = color_str  # type: ignore[attr-defined]
         else:
-            record_clone.log_color = ''
+            record_clone.log_color = ''  # type: ignore[attr-defined]
         for field in ['msg', 'filename', 'funcName', 'levelname', 'module',
                       'name', 'pathname', 'processName', 'threadName']:
             data = str(getattr(record_clone, field))
@@ -651,7 +784,8 @@ class HTMLFormatter(logging.Formatter):
             msg += self._colordict['reset']
         return msg
 
-    def formatTime(self, record, datefmt=None):
+    def formatTime(self, record: logging.LogRecord,
+                   datefmt: str = None) -> str:
         out = super().formatTime(record, datefmt)
         return pyhtml.escape(out)
 
@@ -660,7 +794,7 @@ class JSONFormatter(logging.Formatter):
 
     """Formatter for JSON-encoded log messages."""
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         obj = {}
         for field in ['created', 'msecs', 'levelname', 'name', 'module',
                       'funcName', 'lineno', 'levelno']:

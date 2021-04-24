@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """A filter for signals which either filters or passes them."""
 
@@ -40,7 +40,7 @@ class SignalFilter(QObject):
         BLACKLIST: List of signal names which should not be logged.
     """
 
-    BLACKLIST = ['cur_scroll_perc_changed', 'cur_progress', 'cur_link_hovered']
+    BLACKLIST = {'cur_scroll_perc_changed', 'cur_progress', 'cur_link_hovered'}
 
     def __init__(self, win_id, parent=None):
         super().__init__(parent)
@@ -50,15 +50,18 @@ class SignalFilter(QObject):
         """Factory for partial _filter_signals functions.
 
         Args:
-            signal: The pyqtSignal to filter.
+            signal: The pyqtBoundSignal to filter.
             tab: The WebView to create filters for.
 
         Return:
             A partial function calling _filter_signals with a signal.
         """
-        return functools.partial(self._filter_signals, signal, tab)
+        log_signal = debug.signal_name(signal) not in self.BLACKLIST
+        return functools.partial(
+            self._filter_signals, signal=signal,
+            log_signal=log_signal, tab=tab)
 
-    def _filter_signals(self, signal, tab, *args):
+    def _filter_signals(self, *args, signal, log_signal, tab):
         """Filter signals and trigger TabbedBrowser signals if needed.
 
         Triggers signal if the original signal was sent from the _current_ tab
@@ -72,7 +75,6 @@ class SignalFilter(QObject):
             tab: The WebView which the filter belongs to.
             *args: The args to pass to the signal.
         """
-        log_signal = debug.signal_name(signal) not in self.BLACKLIST
         tabbed_browser = objreg.get('tabbed-browser', scope='window',
                                     window=self._win_id)
         try:

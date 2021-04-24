@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2016-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2016-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,15 +15,17 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Utilities related to javascript interaction."""
 
+from typing import Sequence, Union
 
-from qutebrowser.utils import jinja
+_InnerJsArgType = Union[None, str, bool, int, float]
+_JsArgType = Union[_InnerJsArgType, Sequence[_InnerJsArgType]]
 
 
-def string_escape(text):
+def string_escape(text: str) -> str:
     """Escape values special to javascript in strings.
 
     With this we should be able to use something like:
@@ -40,7 +42,7 @@ def string_escape(text):
         ('\r', r'\r'),
         ('\x00', r'\x00'),
         ('\ufeff', r'\ufeff'),
-        # http://stackoverflow.com/questions/2965293/
+        # https://stackoverflow.com/questions/2965293/
         ('\u2028', r'\u2028'),
         ('\u2029', r'\u2029'),
     )
@@ -49,7 +51,7 @@ def string_escape(text):
     return text
 
 
-def to_js(arg):
+def to_js(arg: _JsArgType) -> str:
     """Convert the given argument so it's the equivalent in JS."""
     if arg is None:
         return 'undefined'
@@ -66,7 +68,7 @@ def to_js(arg):
             arg, type(arg).__name__))
 
 
-def assemble(module, function, *args):
+def assemble(module: str, function: str, *args: _JsArgType) -> str:
     """Assemble a javascript file and a function call."""
     js_args = ', '.join(to_js(arg) for arg in args)
     if module == 'window':
@@ -77,7 +79,8 @@ def assemble(module, function, *args):
     return code
 
 
-def wrap_global(name, *sources):
+def wrap_global(name: str, *sources: str) -> str:
     """Wrap a script using window._qutebrowser."""
+    from qutebrowser.utils import jinja  # circular import
     template = jinja.js_environment.get_template('global_wrapper.js')
     return template.render(code='\n'.join(sources), name=name)

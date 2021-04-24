@@ -15,21 +15,19 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
+import logging
 import os.path
 
 import pytest
 from PyQt5.QtCore import QUrl
 
 from qutebrowser.browser import pdfjs
-from qutebrowser.utils import usertypes, utils
+from qutebrowser.utils import urlmatch
 
 
-@pytest.fixture(autouse=True)
-def patch_data_dir(monkeypatch, tmpdir):
-    monkeypatch.setattr(pdfjs.standarddir, 'data',
-                        lambda: str(tmpdir / 'data'))
+pytestmark = [pytest.mark.usefixtures('data_tmpdir')]
 
 
 @pytest.mark.parametrize('available, snippet', [
@@ -71,36 +69,6 @@ def test_generate_pdfjs_script(filename, expected):
     assert 'PDFView' in actual
 
 
-@pytest.mark.parametrize('qt, backend, expected', [
-    ('new', usertypes.Backend.QtWebEngine, False),
-    ('new', usertypes.Backend.QtWebKit, False),
-    ('old', usertypes.Backend.QtWebEngine, True),
-    ('old', usertypes.Backend.QtWebKit, False),
-    ('5.7', usertypes.Backend.QtWebEngine, False),
-    ('5.7', usertypes.Backend.QtWebKit, False),
-])
-def test_generate_pdfjs_script_disable_object_url(monkeypatch,
-                                                  qt, backend, expected):
-    if qt == 'new':
-        monkeypatch.setattr(pdfjs.qtutils, 'version_check',
-                            lambda version, exact=False, compiled=True:
-                            False if version == '5.7.1' else True)
-    elif qt == 'old':
-        monkeypatch.setattr(pdfjs.qtutils, 'version_check',
-                            lambda version, exact=False, compiled=True: False)
-    elif qt == '5.7':
-        monkeypatch.setattr(pdfjs.qtutils, 'version_check',
-                            lambda version, exact=False, compiled=True:
-                            True if version == '5.7.1' else False)
-    else:
-        raise utils.Unreachable
-
-    monkeypatch.setattr(pdfjs.objects, 'backend', backend)
-
-    script = pdfjs._generate_pdfjs_script('testfile')
-    assert ('PDFJS.disableCreateObjectURL' in script) == expected
-
-
 class TestResources:
 
     @pytest.fixture
@@ -109,7 +77,7 @@ class TestResources:
 
     @pytest.fixture
     def read_file_mock(self, mocker):
-        return mocker.patch.object(pdfjs.utils, 'read_file', autospec=True)
+        return mocker.patch.object(pdfjs.resources, 'read_file_binary', autospec=True)
 
     def test_get_pdfjs_res_system(self, read_system_mock):
         read_system_mock.return_value = (b'content', 'path')
@@ -135,13 +103,42 @@ class TestResources:
                      os.path.expanduser('~/.local/share/qutebrowser/pdfjs/')]:
             read_system_mock.assert_any_call(path, ['web/test', 'test'])
 
-    def test_get_pdfjs_res_not_found(self, read_system_mock, read_file_mock):
+    def test_get_pdfjs_res_not_found(self, read_system_mock, read_file_mock,
+                                     caplog):
         read_system_mock.return_value = (None, None)
         read_file_mock.side_effect = FileNotFoundError
 
         with pytest.raises(pdfjs.PDFJSNotFound,
                            match="Path 'web/test' not found"):
             pdfjs.get_pdfjs_res_and_path('web/test')
+
+        assert not caplog.records
+
+    def test_get_pdfjs_res_oserror(self, read_system_mock, read_file_mock,
+                                   caplog):
+        read_system_mock.return_value = (None, None)
+        read_file_mock.side_effect = OSError("Message")
+
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(pdfjs.PDFJSNotFound,
+                               match="Path 'web/test' not found"):
+                pdfjs.get_pdfjs_res_and_path('web/test')
+
+        expected = 'OSError while reading PDF.js file: Message'
+        assert caplog.messages == [expected]
+
+    def test_broken_installation(self, data_tmpdir, tmpdir, monkeypatch,
+                                 read_file_mock):
+        """Make sure we don't crash with a broken local installation."""
+        monkeypatch.setattr(pdfjs, '_SYSTEM_PATHS', [])
+        monkeypatch.setattr(pdfjs.os.path, 'expanduser',
+                            lambda _in: tmpdir / 'fallback')
+        read_file_mock.side_effect = FileNotFoundError
+
+        (data_tmpdir / 'pdfjs' / 'pdf.js').ensure()  # But no viewer.html
+
+        content = pdfjs.generate_pdfjs_page('example.pdf', QUrl())
+        assert '<h1>No pdf.js installation found</h1>' in content
 
 
 @pytest.mark.parametrize('path, expected', [
@@ -176,6 +173,30 @@ def test_read_from_system(names, expected_name, tmpdir):
     assert pdfjs._read_from_system(str(tmpdir), names) == expected
 
 
+@pytest.fixture
+def unreadable_file(tmpdir):
+    unreadable_file = tmpdir / 'unreadable'
+    unreadable_file.ensure()
+    unreadable_file.chmod(0)
+    if os.access(str(unreadable_file), os.R_OK):
+        # Docker container or similar
+        pytest.skip("File was still readable")
+
+    yield unreadable_file
+
+    unreadable_file.chmod(0o755)
+
+
+def test_read_from_system_oserror(tmpdir, caplog, unreadable_file):
+    expected = (None, None)
+    with caplog.at_level(logging.WARNING):
+        assert pdfjs._read_from_system(str(tmpdir), ['unreadable']) == expected
+
+    assert len(caplog.records) == 1
+    message = caplog.messages[0]
+    assert message.startswith('OSError while reading PDF.js file:')
+
+
 @pytest.mark.parametrize('available', [True, False])
 def test_is_available(available, mocker):
     mock = mocker.patch.object(pdfjs, 'get_pdfjs_res', autospec=True)
@@ -203,7 +224,19 @@ def test_should_use_pdfjs(mimetype, url, enabled, expected, config_stub):
     assert pdfjs.should_use_pdfjs(mimetype, QUrl(url)) == expected
 
 
+@pytest.mark.parametrize('url, expected', [
+    ('http://example.com', True),
+    ('http://example.org', False),
+])
+def test_should_use_pdfjs_url_pattern(config_stub, url, expected):
+    config_stub.val.content.pdfjs = False
+    pattern = urlmatch.UrlPattern('http://example.com')
+    config_stub.set_obj('content.pdfjs', True, pattern=pattern)
+    assert pdfjs.should_use_pdfjs('application/pdf', QUrl(url)) == expected
+
+
 def test_get_main_url():
-    expected = ('qute://pdfjs/web/viewer.html?filename='
-                'hello?world.pdf&file=')
-    assert pdfjs.get_main_url('hello?world.pdf') == QUrl(expected)
+    expected = QUrl('qute://pdfjs/web/viewer.html?filename=hello?world.pdf&'
+                    'file=&source=http://a.com/hello?world.pdf')
+    original_url = QUrl('http://a.com/hello?world.pdf')
+    assert pdfjs.get_main_url('hello?world.pdf', original_url) == expected

@@ -9,9 +9,7 @@ qutebrowser's config files
 --------------------------
 
 qutebrowser releases before v1.0.0 had a `qutebrowser.conf` and `keys.conf`
-file. Those are not used anymore since that release - see
-<<migrating,"Migrating older configurations">> for information on how to
-migrate to the new config.
+file. Those are not used anymore since v1.0.0.
 
 When using `:set` and `:bind`, changes are saved to an `autoconfig.yml` file
 automatically. If you don't want to have a config file which is curated by
@@ -19,10 +17,10 @@ hand, you can simply use those - see
 <<autoconfig,"Configuring qutebrowser via the user interface">> for details.
 
 For more advanced configuration, you can write a `config.py` file - see
-<<configpy,"Configuring qutebrowser via config.py">>. As soon as a `config.py`
+<<configpy,"Configuring qutebrowser via config.py">>. When a `config.py`
 exists, the `autoconfig.yml` file **is not read anymore** by default. You need
-to <<configpy-autoconfig,load it by hand>> if you want settings done via
-`:set`/`:bind` to still persist.
+to <<configpy-autoconfig,load it from `config.py`>> if you want settings changed via
+`:set`/`:bind` to persist between restarts.
 
 [[autoconfig]]
 Configuring qutebrowser via the user interface
@@ -89,7 +87,7 @@ You can run `:config-edit` inside qutebrowser to open the file in your editor,
 The file should be located in the "config" location listed on
 link:qute://version[], which is typically `~/.config/qutebrowser/config.py` on
 Linux, `~/.qutebrowser/config.py` on macOS, and
-`%APPDATA%/qutebrowser/config.py` on Windows.
+`%APPDATA%/qutebrowser/config/config.py` on Windows.
 
 Two global objects are pre-defined when running `config.py`: `c` and `config`.
 
@@ -118,7 +116,7 @@ accepted values depend on the type of the option. Commonly used are:
 - Booleans: `c.completion.shrink = True`
 - Integers: `c.messages.timeout = 5000`
 - Dictionaries:
-  * `c.headers.custom = {'X-Hello': 'World', 'X-Awesome': 'yes'}` to override
+  * `c.content.headers.custom = {'X-Hello': 'World', 'X-Awesome': 'yes'}` to override
     any other values in the dictionary.
   * `c.aliases['foo'] = 'message-info foo'` to add a single value.
 - Lists:
@@ -182,7 +180,7 @@ with config.pattern('*://example.com/') as p:
 Binding keys
 ~~~~~~~~~~~~
 
-While it's possible to change the `bindings.commands` setting to bind keys, it's
+While it's possible to change the `bindings.commands` setting to customize the keyboard shortcuts, it's
 preferred to use the `config.bind` command. Doing so ensures the commands are
 valid and normalizes different expressions which map to the same key.
 
@@ -229,18 +227,18 @@ Loading `autoconfig.yml`
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 All customization done via the UI (`:set`, `:bind` and `:unbind`) is
-stored in the `autoconfig.yml` file, which is not loaded automatically as soon
-as a `config.py` exists. If you want those settings to be loaded, you'll need to
-explicitly load the `autoconfig.yml` file in your `config.py` by doing:
+stored in the `autoconfig.yml` file. When a `config.py` file exists, `autoconfig.yml`
+is not loaded automatically. To load `autoconfig.yml` automatically, add the
+following snippet to `config.py`:
 
-.config.py:
 [source,python]
 ----
 config.load_autoconfig()
 ----
 
-If you do so at the top of your file, your `config.py` settings will take
-precedence as they overwrite the settings done in `autoconfig.yml`.
+You can configure which file overrides the other by the location of the above code snippet.
+Place the snippet at the top to allow `config.py` to override `autoconfig.yml`.
+Place the snippet at the bottom for the opposite effect.
 
 Importing other modules
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -309,7 +307,7 @@ You can use:
 import yaml
 
 with (config.configdir / 'config.yml').open() as f:
-    yaml_data = yaml.load(f)
+    yaml_data = yaml.safe_load(f)
 
 for k, v in yaml_data.items():
     config.set(k, v)
@@ -339,7 +337,7 @@ You can use:
 import yaml
 
 with (config.configdir / 'colors.yml').open() as f:
-    yaml_data = yaml.load(f)
+    yaml_data = yaml.safe_load(f)
 
 def dict_attrs(obj, path=''):
     if isinstance(obj, dict):
@@ -394,8 +392,11 @@ Pre-built colorschemes
 ^^^^^^^^^^^^^^^^^^^^^^
 
 - A collection of https://github.com/chriskempson/base16[base16] color-schemes can be found in https://github.com/theova/base16-qutebrowser[base16-qutebrowser] and used with https://github.com/AuditeMarlow/base16-manager[base16-manager].
-- Two implementations of the https://github.com/arcticicestudio/nord[Nord] colorscheme for qutebrowser exist: https://github.com/Linuus/nord-qutebrowser[Linuus], https://github.com/KnownAsDon/QuteBrowser-Nord-Theme[KnownAsDon]
-- https://github.com/evannagle/qutebrowser-dracula-theme[Dracula]
+- https://gitlab.com/jjzmajic/qutewal[Pywal integration]
+- https://github.com/arcticicestudio/nord[Nord]: https://github.com/Linuus/nord-qutebrowser[Linuus], https://github.com/KnownAsDon/QuteBrowser-Nord-Theme[KnownAsDon]
+- https://github.com/dracula/qutebrowser-dracula-theme[Dracula]
+- https://gitlab.com/lovetocode999/selenized-qutebrowser[Selenized]
+- https://github.com/morhetz/gruvbox[gruvbox]: https://github.com/The-Compiler/dotfiles/blob/master/qutebrowser/gruvbox.py[The-Compiler], https://gitlab.com/shaneyost/dots-popos-september-2020/-/blob/master/qutebrowser/config.py[Shane Yost]
 
 Avoiding flake8 errors
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -419,41 +420,20 @@ stable across qutebrowser versions):
 # pylint: disable=C0111
 from qutebrowser.config.configfiles import ConfigAPI  # noqa: F401
 from qutebrowser.config.config import ConfigContainer  # noqa: F401
-config = config  # type: ConfigAPI # noqa: F821 pylint: disable=E0602,C0103
-c = c  # type: ConfigContainer # noqa: F821 pylint: disable=E0602,C0103
+config: ConfigAPI = config  # noqa: F821 pylint: disable=E0602,C0103
+c: ConfigContainer = c  # noqa: F821 pylint: disable=E0602,C0103
 ----
 
-[[migrating]]
-Migrating older configurations
-------------------------------
+emacs-like config
+^^^^^^^^^^^^^^^^^
 
-qutebrowser does no automatic migration for the new configuration. However,
-there's a special link:qute://configdiff/old[configdiff] page
-(`qute://configdiff/old`) in qutebrowser, which will show you the changes you
-did in your old configuration, compared to the old defaults.
+Various emacs/conkeror-like keybinding configs exist:
 
-Other changes in default settings:
+- https://gitlab.com/jgkamat/qutemacs/blob/master/qutemacs.py[jgkamat]
+- https://gitlab.com/Kaligule/qutebrowser-emacs-config/blob/master/config.py[Kaligule]
+- https://me0w.net/pit/1540882719[nm0i]
+- https://www.reddit.com/r/qutebrowser/comments/eh10i7/config_share_qute_with_emacs_keybindings/[jasonsun0310]
 
-- In v1.1.x and newer, `<Up>` and `<Down>` navigate through command history
-  if no text was entered yet.
-  With v1.0.x, they always navigate through command history instead of selecting
-  completion items. Use `<Tab>`/`<Shift-Tab>` to cycle through the completion
-  instead.
-  You can get back the old behavior by doing:
-+
-----
-:bind -m command <Up> completion-item-focus prev
-:bind -m command <Down> completion-item-focus next
-----
-+
-or always navigate through command history with
-+
-----
-:bind -m command <Up> command-history-prev
-:bind -m command <Down> command-history-next
-----
-
-- The default for `completion.web_history.max_items` is now set to `-1`, showing
-  an unlimited number of items in the completion for `:open` as the new
-  sqlite-based completion is much faster. If the `:open` completion is too slow
-  on your machine, set an appropriate limit again.
+It's also mostly possible to get rid of modal keybindings by setting
+`input.insert_mode.auto_enter` to `false`, and `input.forward_unbound_keys` to
+`all`.

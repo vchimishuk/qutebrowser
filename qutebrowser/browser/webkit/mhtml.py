@@ -1,5 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
+# Copyright 2015-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 # Copyright 2015-2018 Daniel Schadt
 #
 # This file is part of qutebrowser.
@@ -15,7 +16,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Utils for writing an MHTML file."""
 
@@ -32,22 +33,24 @@ import email.encoders
 import email.mime.multipart
 import email.message
 import quopri
+import dataclasses
+from typing import MutableMapping, Set, Tuple, Callable
 
-import attr
 from PyQt5.QtCore import QUrl
 
 from qutebrowser.browser import downloads
 from qutebrowser.browser.webkit import webkitelem
 from qutebrowser.utils import log, objreg, message, usertypes, utils, urlutils
+from qutebrowser.extensions import interceptors
 
 
-@attr.s
+@dataclasses.dataclass
 class _File:
 
-    content = attr.ib()
-    content_type = attr.ib()
-    content_location = attr.ib()
-    transfer_encoding = attr.ib()
+    content: bytes
+    content_type: str
+    content_location: str
+    transfer_encoding: Callable[[email.message.Message], None]
 
 
 _CSS_URL_PATTERNS = [re.compile(x) for x in [
@@ -59,7 +62,7 @@ _CSS_URL_PATTERNS = [re.compile(x) for x in [
 ]]
 
 
-def _get_css_imports_regex(data):
+def _get_css_imports(data):
     """Return all assets that are referenced in the given CSS document.
 
     The returned URLs are relative to the stylesheet's URL.
@@ -74,58 +77,6 @@ def _get_css_imports_regex(data):
             if url:
                 urls.append(url)
     return urls
-
-
-def _get_css_imports_cssutils(data, inline=False):
-    """Return all assets that are referenced in the given CSS document.
-
-    The returned URLs are relative to the stylesheet's URL.
-
-    Args:
-        data: The content of the stylesheet to scan as string.
-        inline: True if the argument is an inline HTML style attribute.
-    """
-    try:
-        import cssutils
-    except (ImportError, re.error):
-        # Catching re.error because cssutils in earlier releases (<= 1.0) is
-        # broken on Python 3.5
-        # See https://bitbucket.org/cthedot/cssutils/issues/52
-        return None
-
-    # We don't care about invalid CSS data, this will only litter the log
-    # output with CSS errors
-    parser = cssutils.CSSParser(loglevel=100,
-                                fetcher=lambda url: (None, ""), validate=False)
-    if not inline:
-        sheet = parser.parseString(data)
-        return list(cssutils.getUrls(sheet))
-    else:
-        urls = []
-        declaration = parser.parseStyle(data)
-        # prop = background, color, margin, ...
-        for prop in declaration:
-            # value = red, 10px, url(foobar), ...
-            for value in prop.propertyValue:
-                if isinstance(value, cssutils.css.URIValue):
-                    if value.uri:
-                        urls.append(value.uri)
-        return urls
-
-
-def _get_css_imports(data, inline=False):
-    """Return all assets that are referenced in the given CSS document.
-
-    The returned URLs are relative to the stylesheet's URL.
-
-    Args:
-        data: The content of the stylesheet to scan as string.
-        inline: True if the argument is an inline HTML style attribute.
-    """
-    imports = _get_css_imports_cssutils(data, inline)
-    if imports is None:
-        imports = _get_css_imports_regex(data)
-    return imports
 
 
 def _check_rel(element):
@@ -186,7 +137,7 @@ class MHTMLWriter:
         self.root_content = root_content
         self.content_location = content_location
         self.content_type = content_type
-        self._files = {}
+        self._files: MutableMapping[QUrl, _File] = {}
 
     def add_file(self, location, content, content_type=None,
                  transfer_encoding=E_QUOPRI):
@@ -241,6 +192,9 @@ class MHTMLWriter:
         return msg
 
 
+_PendingDownloadType = Set[Tuple[QUrl, downloads.AbstractDownloadItem]]
+
+
 class _Downloader:
 
     """A class to download whole websites.
@@ -261,7 +215,7 @@ class _Downloader:
         self.target = target
         self.writer = None
         self.loaded_urls = {tab.url()}
-        self.pending_downloads = set()
+        self.pending_downloads: _PendingDownloadType = set()
         self._finished_file = False
         self._used = False
 
@@ -325,7 +279,7 @@ class _Downloader:
         for element in web_frame.findAllElements('[style]'):
             element = webkitelem.WebKitElement(element, tab=self.tab)
             style = element['style']
-            for element_url in _get_css_imports(style, inline=True):
+            for element_url in _get_css_imports(style):
                 self._fetch_url(web_url.resolved(QUrl(element_url)))
 
         # Shortcut if no assets need to be downloaded, otherwise the file would
@@ -341,6 +295,8 @@ class _Downloader:
         Args:
             url: The file to download as QUrl.
         """
+        assert self.writer is not None
+
         if url.scheme() not in ['http', 'https']:
             return
         # Prevent loading an asset twice
@@ -354,8 +310,9 @@ class _Downloader:
         # qute, see the comments/discussion on
         # https://github.com/qutebrowser/qutebrowser/pull/962#discussion_r40256987
         # and https://github.com/qutebrowser/qutebrowser/issues/1053
-        host_blocker = objreg.get('host-blocker')
-        if host_blocker.is_blocked(url):
+        request = interceptors.Request(first_party_url=None, request_url=url)
+        interceptors.run(request)
+        if request.is_blocked:
             log.downloads.debug("Skipping {}, host-blocked".format(url))
             # We still need an empty file in the output, QWebView can be pretty
             # picky about displaying a file correctly when not all assets are
@@ -379,6 +336,8 @@ class _Downloader:
             url: The original url of the asset as QUrl.
             item: The DownloadItem given by the DownloadManager
         """
+        assert self.writer is not None
+
         self.pending_downloads.remove((url, item))
         mime = item.raw_headers.get(b'Content-Type', b'')
 
@@ -429,6 +388,7 @@ class _Downloader:
             url: The original url of the asset as QUrl.
             item: The DownloadItem given by the DownloadManager.
         """
+        assert self.writer is not None
         try:
             self.pending_downloads.remove((url, item))
         except KeyError:
@@ -459,6 +419,8 @@ class _Downloader:
 
     def _finish_file(self):
         """Save the file to the filename given in __init__."""
+        assert self.writer is not None
+
         if self._finished_file:
             log.downloads.debug("finish_file called twice, ignored!")
             return
@@ -516,7 +478,6 @@ class _NoCloseBytesIO(io.BytesIO):
 
     def close(self):
         """Do nothing."""
-        pass
 
     def actual_close(self):
         """Close the stream."""
@@ -548,7 +509,7 @@ def start_download_checked(target, tab):
         return
     # The default name is 'page title.mhtml'
     title = tab.title()
-    default_name = utils.sanitize_filename(title + '.mhtml')
+    default_name = utils.sanitize_filename(title + '.mhtml', shorten=True)
 
     # Remove characters which cannot be expressed in the file system encoding
     encoding = sys.getfilesystemencoding()
