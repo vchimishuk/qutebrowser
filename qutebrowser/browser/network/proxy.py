@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -19,23 +19,41 @@
 
 """Handling of proxies."""
 
-
+from PyQt5.QtCore import QUrl, pyqtSlot
 from PyQt5.QtNetwork import QNetworkProxy, QNetworkProxyFactory
 
 from qutebrowser.config import config, configtypes
-from qutebrowser.utils import objreg
+from qutebrowser.utils import message, usertypes, urlutils
+from qutebrowser.misc import objects
 from qutebrowser.browser.network import pac
+
+
+application_factory = None
 
 
 def init():
     """Set the application wide proxy factory."""
-    proxy_factory = ProxyFactory()
-    objreg.register('proxy-factory', proxy_factory)
-    QNetworkProxyFactory.setApplicationProxyFactory(proxy_factory)
+    global application_factory
+    application_factory = ProxyFactory()
+    QNetworkProxyFactory.setApplicationProxyFactory(application_factory)
+
+    config.instance.changed.connect(_warn_for_pac)
+    _warn_for_pac()
 
 
+@config.change_filter('content.proxy', function=True)
+def _warn_for_pac():
+    """Show a warning if PAC is used with QtWebEngine."""
+    proxy = config.val.content.proxy
+    if (isinstance(proxy, pac.PACFetcher) and
+            objects.backend == usertypes.Backend.QtWebEngine):
+        message.error("PAC support isn't implemented for QtWebEngine yet!")
+
+
+@pyqtSlot()
 def shutdown():
-    QNetworkProxyFactory.setApplicationProxyFactory(None)
+    QNetworkProxyFactory.setApplicationProxyFactory(
+        None)  # type: ignore[arg-type]
 
 
 class ProxyFactory(QNetworkProxyFactory):
@@ -54,6 +72,18 @@ class ProxyFactory(QNetworkProxyFactory):
         else:
             return None
 
+    def _set_capabilities(self, proxy):
+        if proxy.type() == QNetworkProxy.NoProxy:
+            return
+
+        capabilities = proxy.capabilities()
+        lookup_cap = QNetworkProxy.HostNameLookupCapability
+        if config.val.content.proxy_dns_requests:
+            capabilities |= lookup_cap
+        else:
+            capabilities &= ~lookup_cap
+        proxy.setCapabilities(capabilities)
+
     def queryProxy(self, query):
         """Get the QNetworkProxies for a query.
 
@@ -70,15 +100,15 @@ class ProxyFactory(QNetworkProxyFactory):
             # ref. http://doc.qt.io/qt-5/qnetworkproxyfactory.html#systemProxyForQuery
             proxies = QNetworkProxyFactory.systemProxyForQuery(query)
         elif isinstance(proxy, pac.PACFetcher):
-            proxies = proxy.resolve(query)
+            if objects.backend == usertypes.Backend.QtWebEngine:
+                # Looks like query.url() is always invalid on QtWebEngine...
+                proxy = urlutils.proxy_from_url(QUrl('direct://'))
+                assert not isinstance(proxy, pac.PACFetcher)
+                proxies = [proxy]
+            else:
+                proxies = proxy.resolve(query)
         else:
             proxies = [proxy]
-        for p in proxies:
-            if p.type() != QNetworkProxy.NoProxy:
-                capabilities = p.capabilities()
-                if config.val.content.proxy_dns_requests:
-                    capabilities |= QNetworkProxy.HostNameLookupCapability
-                else:
-                    capabilities &= ~QNetworkProxy.HostNameLookupCapability
-                p.setCapabilities(capabilities)
+        for proxy in proxies:
+            self._set_capabilities(proxy)
         return proxies

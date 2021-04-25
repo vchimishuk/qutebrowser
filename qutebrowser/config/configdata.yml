@@ -3,8 +3,10 @@
 aliases:
   default:
     w: session-save
-    q: quit
+    q: close
+    qa: quit
     wq: quit --save
+    wqa: quit --save
   type:
     name: Dict
     keytype:
@@ -37,12 +39,7 @@ ignore_case:
   renamed: search.ignore_case
 
 search.ignore_case:
-  type:
-    name: String
-    valid_values:
-      - always: Search case-insensitively.
-      - never: Search case-sensitively.
-      - smart: Search case-sensitively if there are capital characters.
+  type: IgnoreCase
   default: smart
   desc: When to find text on a page case-insensitively.
 
@@ -50,6 +47,16 @@ search.incremental:
   type: Bool
   default: True
   desc: Find text on a page incrementally, renewing the search for each typed character.
+
+search.wrap:
+  type: Bool
+  default: True
+  backend:
+    QtWebEngine: Qt 5.14
+    QtWebKit: true
+  desc: >-
+    Wrap around at the top and bottom of the page when advancing through text matches
+    using `:search-next` and `:search-prev`.
 
 new_instance_open_target:
   type:
@@ -84,7 +91,7 @@ new_instance_open_target_window:
   desc: >-
     Which window to choose when opening links as new tabs.
 
-    When `new_instance_open_target` is not set to `window`, this is ignored.
+    When `new_instance_open_target` is set to `window`, this is ignored.
 
 session_default_name:
   renamed: session.default_name
@@ -181,6 +188,19 @@ qt.force_platform:
     This sets the `QT_QPA_PLATFORM` environment variable and is useful to force
     using the XCB plugin when running QtWebEngine on Wayland.
 
+qt.force_platformtheme:
+  type:
+    name: String
+    none_ok: true
+  default: null
+  restart: true
+  desc: >-
+    Force a Qt platformtheme to use.
+
+    This sets the `QT_QPA_PLATFORMTHEME` environment variable which controls
+    dialogs like the filepicker. By default, Qt determines the platform theme
+    based on the desktop environment.
+
 qt.process_model:
   type:
     name: String
@@ -234,8 +254,8 @@ qt.highdpi:
   desc: >-
     Turn on Qt HighDPI scaling.
 
-    This is equivalent to setting QT_AUTO_SCREEN_SCALE_FACTOR=1 in the
-    environment.
+    This is equivalent to setting QT_AUTO_SCREEN_SCALE_FACTOR=1 or
+    QT_ENABLE_HIGHDPI_SCALING=1 (Qt >= 5.14) in the environment.
 
     It's off by default as it can cause issues with some bitmap fonts.
     As an alternative to this, it's possible to set font sizes and the
@@ -327,20 +347,31 @@ content.cache.appcache:
     ask the application cache for the contents, before hitting the network.
 
 content.cookies.accept:
-  default: no-3rdparty
+  default: all
   backend:
     QtWebKit: true
     QtWebEngine: Qt 5.11
+  supports_pattern: true
   type:
     name: String
     valid_values:
       - all: "Accept all cookies."
-      - no-3rdparty: "Accept cookies from the same origin only."
+      - no-3rdparty: "Accept cookies from the same origin only. This is known
+          to break some sites, such as GMail."
       - no-unknown-3rdparty: "Accept cookies from the same origin only, unless
           a cookie is already set for the domain. On QtWebEngine, this is the
           same as no-3rdparty."
       - never: "Don't accept cookies at all."
-  desc: Which cookies to accept.
+  desc: >-
+    Which cookies to accept.
+
+    With QtWebEngine, this setting also controls other features with tracking
+    capabilities similar to those of cookies; including IndexedDB, DOM storage,
+    filesystem API, service workers, and AppCache.
+
+    Note that with QtWebKit, only `all` and `never` are supported as per-domain
+    values. Setting `no-3rdparty` or `no-unknown-3rdparty` per-domain on
+    QtWebKit will have the same effect as `all`.
 
 content.cookies.store:
   default: true
@@ -359,11 +390,45 @@ content.default_encoding:
     The encoding must be a string describing an encoding such as _utf-8_,
     _iso-8859-1_, etc.
 
+content.unknown_url_scheme_policy:
+  type:
+    name: String
+    valid_values:
+      - disallow: "Disallows all navigation requests to URLs with unknown
+          schemes."
+      - allow-from-user-interaction: "Allows navigation requests to URLs with
+          unknown schemes that are issued from user-interaction (like a
+          mouse-click), whereas other navigation requests (for example from
+          JavaScript) are suppressed."
+      - allow-all: "Allows all navigation requests to URLs with unknown
+          schemes."
+  default: allow-from-user-interaction
+  backend:
+    QtWebEngine: Qt 5.11
+    QtWebKit: false
+  supports_pattern: true
+  desc: >-
+    How navigation requests to URLs with unknown schemes are handled.
+
 content.windowed_fullscreen:
+  renamed: content.fullscreen.window
+
+content.fullscreen.window:
   type: Bool
   default: false
   desc: >-
     Limit fullscreen to the browser window (does not expand to fill the screen).
+
+content.fullscreen.overlay_timeout:
+  type:
+    name: Int
+    minval: 0
+    maxval: maxint
+  default: 3000
+  desc: >-
+    Set fullscreen notification overlay timeout in milliseconds.
+
+    If set to 0, no overlay will be displayed.
 
 content.desktop_capture:
   type: BoolAsk
@@ -379,9 +444,11 @@ content.developer_extras:
   deleted: true
 
 content.dns_prefetch:
-  default: true
+  default: false
   type: Bool
-  backend: QtWebKit
+  backend:
+    QtWebKit: true
+    QtWebEngine: Qt 5.12
   supports_pattern: true
   desc: Try to pre-fetch DNS entries to speed up browsing.
 
@@ -394,6 +461,15 @@ content.frame_flattening:
     Expand each subframe to its contents.
 
     This will flatten all the frames to become one scrollable page.
+
+content.site_specific_quirks:
+  default: true
+  restart: true
+  type: Bool
+  desc: 'Enable quirks (such as faked user agent headers) needed to get
+      specific sites to work properly.'
+
+# emacs: '
 
 content.geolocation:
   default: ask
@@ -415,7 +491,7 @@ content.headers.accept_language:
     name: String
     none_ok: true
   supports_pattern: true
-  default: en-US,en
+  default: en-US,en;q=0.9
   desc: >-
     Value to send in the `Accept-Language` header.
 
@@ -469,64 +545,51 @@ content.headers.referer:
     No restart is needed with QtWebKit.
 
 content.headers.user_agent:
-  default: null
+  default: 'Mozilla/5.0 ({os_info})
+      AppleWebKit/{webkit_version} (KHTML, like Gecko)
+      {qt_key}/{qt_version} {upstream_browser_key}/{upstream_browser_version}
+      Safari/{webkit_version}'
   type:
-    name: String
-    none_ok: true
+    name: FormatString
+    fields:
+      - os_info
+      - webkit_version
+      - qt_key
+      - qt_version
+      - upstream_browser_key
+      - upstream_browser_version
+      - qutebrowser_version
     completions:
-      # To update the following list of user agents, run the script
-      # 'ua_fetch.py'
-      # Vim-protip: Place your cursor below this comment and run
-      # :r!python scripts/dev/ua_fetch.py
-      - - "Mozilla/5.0 (Windows NT 6.3; WOW64; rv:53.0) Gecko/20100101
-          Firefox/53.0"
-        - Firefox 53.0 Win8.1
-      - - "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:53.0) Gecko/20100101
-          Firefox/53.0"
-        - Firefox 53.0 Linux
-      - - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:53.0)
-          Gecko/20100101 Firefox/53.0"
-        - Firefox 53.0 MacOSX
-
-      - - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_5) AppleWebKit/603.2.4
-          (KHTML, like Gecko) Version/10.1.1 Safari/603.2.4"
-        - Safari Generic MacOSX
-      - - "Mozilla/5.0 (iPad; CPU OS 10_3_1 like Mac OS X) AppleWebKit/603.1.30
-          (KHTML, like Gecko) Version/10.0 Mobile/14E304 Safari/602.1"
-        - Mobile Safari 10.0 iOS
-
+      # See https://techblog.willshouse.com/2012/01/03/most-common-user-agents/
       - - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
-          like Gecko) Chrome/58.0.3029.110 Safari/537.36"
-        - Chrome Generic Win10
-      - - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_5) AppleWebKit/537.36
-          (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36"
-        - Chrome Generic MacOSX
+          like Gecko) Chrome/81.0.4044.129 Safari/537.36"
+        - Chrome 80 Win10
       - - "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like
-          Gecko) Chrome/58.0.3029.110 Safari/537.36"
-        - Chrome Generic Linux
-
-      - - "Mozilla/5.0 (compatible; Googlebot/2.1;
-          +http://www.google.com/bot.html"
-        - Google Bot
-      - - "Wget/1.16.1 (linux-gnu)"
-        - wget 1.16.1
-      - - "curl/7.40.0"
-        - curl 7.40.0
-      - - "Mozilla/5.0 (Linux; U; Android 7.1.2) AppleWebKit/534.30 (KHTML,
-          like Gecko) Version/4.0 Mobile Safari/534.30"
-        - Mobile Generic Android
-      - - "Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like
-          Gecko"
-        - IE 11.0 for Desktop Win7 64-bit
-
+          Gecko) Chrome/81.0.4044.138 Safari/537.36"
+        - Chrome 80 Linux
   supports_pattern: true
-  desc: >-
-    User agent to send. Unset to send the default.
+  desc: |
+    User agent to send.
+
+    The following placeholders are defined:
+
+    * `{os_info}`: Something like "X11; Linux x86_64".
+    * `{webkit_version}`: The underlying WebKit version (set to a fixed value
+      with QtWebEngine).
+    * `{qt_key}`: "Qt" for QtWebKit, "QtWebEngine" for QtWebEngine.
+    * `{qt_version}`: The underlying Qt version.
+    * `{upstream_browser_key}`: "Version" for QtWebKit, "Chrome" for QtWebEngine.
+    * `{upstream_browser_version}`: The corresponding Safari/Chrome version.
+    * `{qutebrowser_version}`: The currently running qutebrowser version.
+
+    The default value is equal to the unchanged user agent of
+    QtWebKit/QtWebEngine.
 
     Note that the value read from JavaScript is always the global value.
 
 content.host_blocking.enabled:
   default: true
+  supports_pattern: true
   type: Bool
   desc: Enable host blocking.
 
@@ -553,14 +616,19 @@ content.host_blocking.lists:
     The file `~/.config/qutebrowser/blocked-hosts` is always read if it exists.
 
 content.host_blocking.whitelist:
-  default:
-  - piwik.org
+  default: []
   type:
     name: List
     valtype: UrlPattern
     none_ok: true
   desc: >-
     A list of patterns that should always be loaded, despite being ad-blocked.
+
+    Note this whitelists blocked hosts, not first-party URLs. As an example, if
+    `example.org` loads an ad from `ads.example.org`, the whitelisted host
+    should be `ads.example.org`. If you want to disable the adblocker on a
+    given page, use the `content.host_blocking.enabled` setting with a URL
+    pattern instead.
 
     Local domains are always exempt from hostblocking.
 
@@ -637,6 +705,9 @@ content.javascript.log:
 
     On QtWebKit, the "unknown" setting is always used.
 
+    The following levels are valid: `none`, `debug`, `info`, `warning`,
+    `error`.
+
 content.javascript.modal_dialog:
   type: Bool
   default: false
@@ -686,12 +757,15 @@ content.notifications:
   default: ask
   type: BoolAsk
   supports_pattern: true
-  backend: QtWebKit
+  backend:
+    QtWebEngine: Qt 5.13
+    QtWebKit: true
   desc: Allow websites to show notifications.
 
 content.pdfjs:
   default: false
   type: Bool
+  supports_pattern: true
   desc: >-
     Allow pdf.js to view PDF files in the browser.
 
@@ -803,13 +877,17 @@ content.webrtc_ip_handling_policy:
 
 content.xss_auditing:
   type: Bool
-  default: true
+  default: false
   supports_pattern: true
   desc: >-
     Monitor load requests for cross-site scripting attempts.
 
     Suspicious scripts will be blocked and reported in the inspector's
     JavaScript console.
+
+    Note that bypasses for the XSS auditor are widely known and it can be
+    abused for cross-site info leaks in some scenarios, see:
+    https://www.chromium.org/developers/design-documents/xss-auditor
 
 content.mute:
   default: false
@@ -883,10 +961,13 @@ completion.scrollbar.padding:
 
 completion.timestamp_format:
   type:
-    name: TimestampTemplate
+    name: String
     none_ok: true
   default: '%Y-%m-%d'
-  desc: Format of timestamps (e.g. for the history completion).
+  desc: >-
+    Format of timestamps (e.g. for the history completion).
+
+    See https://sqlite.org/lang_datefunc.html for allowed substitutions.
 
 completion.web_history.exclude:
   type:
@@ -974,6 +1055,18 @@ downloads.location.suggestion:
       - both: Show download path and filename.
   desc: What to display in the download filename input.
 
+completion.open_categories:
+  type:
+    name: FlagList
+    valid_values: [searchengines, quickmarks, bookmarks, history]
+    none_ok: true
+  default:
+    - searchengines
+    - quickmarks
+    - bookmarks
+    - history
+  desc: Which categories to show (in which order) in the :open completion.
+
 downloads.open_dispatcher:
   type:
     name: String
@@ -1009,7 +1102,7 @@ editor.command:
     name: ShellCommand
     placeholder: true
   default: ["gvim", "-f", "{file}", "-c", "normal {line}G{column0}l"]
-  desc: >-
+  desc: |
     Editor (and arguments) to use for the `open-editor` command.
     The following placeholders are defined:
 
@@ -1051,6 +1144,22 @@ hints.border:
   default: '1px solid #E3BE23'
   type: String
   desc: CSS border value for hints.
+
+hints.padding:
+  default:
+    top: 0
+    bottom: 0
+    left: 3
+    right: 3
+  type: Padding
+  desc: Padding (in pixels) for hints.
+
+hints.radius:
+  default: 3
+  type:
+    name: Int
+    minval: 0
+  desc: Rounding radius (in pixels) for the edges of hints.
 
 hints.chars:
   default: asdfghjkl
@@ -1141,10 +1250,80 @@ hints.scatter:
 
     Ignored for number hints.
 
+hints.selectors:
+  no_autoconfig: true
+  default:
+    all:
+      - 'a'
+      - 'area'
+      - 'textarea'
+      - 'select'
+      - 'input:not([type="hidden"])'
+      - 'button'
+      - 'frame'
+      - 'iframe'
+      - 'img'
+      - 'link'
+      - 'summary'
+      - '[onclick]'
+      - '[onmousedown]'
+      - '[role="link"]'
+      - '[role="option"]'
+      - '[role="button"]'
+      - '[ng-click]'
+      - '[ngClick]'
+      - '[data-ng-click]'
+      - '[x-ng-click]'
+      - '[tabindex]'
+    links:
+      - 'a[href]'
+      - 'area[href]'
+      - 'link[href]'
+      - '[role="link"][href]'
+    images:
+      - 'img'
+    media:
+      - 'audio'
+      - 'img'
+      - 'video'
+    url:
+      - '[src]'
+      - '[href]'
+    inputs:
+      - 'input[type="text"]'
+      - 'input[type="date"]'
+      - 'input[type="datetime-local"]'
+      - 'input[type="email"]'
+      - 'input[type="month"]'
+      - 'input[type="number"]'
+      - 'input[type="password"]'
+      - 'input[type="search"]'
+      - 'input[type="tel"]'
+      - 'input[type="time"]'
+      - 'input[type="url"]'
+      - 'input[type="week"]'
+      - 'input:not([type])'
+      - 'textarea'
+  type:
+    name: Dict
+    keytype: String
+    valtype:
+      name: List
+      none_ok: true
+      valtype: String
+  supports_pattern: true
+  desc: CSS selectors used to determine which elements on a page should have
+    hints.
+
 hints.uppercase:
   default: false
   type: Bool
   desc: Make characters in hint strings uppercase.
+
+hints.leave_on_load:
+  default: true
+  type: Bool
+  desc: Leave hint mode when starting a new page load.
 
 ## input
 
@@ -1183,6 +1362,16 @@ input.insert_mode.plugins:
   default: false
   type: Bool
   desc: Switch to insert mode when clicking flash and other plugins.
+
+input.insert_mode.leave_on_load:
+  default: true
+  type: Bool
+  supports_pattern: true
+  desc: >-
+    Leave insert mode when starting a new page load.
+
+    Patterns may be unreliable on this setting, and they may match the url you
+    are navigating to, or the URL you are navigating from.
 
 input.links_included_in_focus_chain:
   default: true
@@ -1275,7 +1464,7 @@ messages.unfocused:
 prompt.filebrowser:
   type: Bool
   default: true
-  desc: Show a filebrowser in upload/download prompts.
+  desc: Show a filebrowser in download prompts.
 
 prompt.radius:
   type:
@@ -1475,12 +1664,27 @@ tabs.mousewheel_switching:
 tabs.new_position.related:
   default: next
   type: NewTabPosition
-  desc: Position of new tabs opened from another tab.
+  desc: >-
+    Position of new tabs opened from another tab.
+
+    See `tabs.new_position.stacking` for controlling stacking behavior.
 
 tabs.new_position.unrelated:
   default: last
   type: NewTabPosition
-  desc: "Position of new tabs which aren't opened from another tab."
+  desc: >-
+    Position of new tabs which are not opened from another tab.
+
+    See `tabs.new_position.stacking` for controlling stacking behavior.
+
+tabs.new_position.stacking:
+  default: true
+  type: Bool
+  desc: >-
+    Stack related tabs on top of each other when opened consecutively.
+
+    Only applies for `next` and `prev` values of `tabs.new_position.related`
+    and `tabs.new_position.unrelated`.
 
 tabs.padding:
   default:
@@ -1542,13 +1746,13 @@ tabs.title.alignment:
   desc: Alignment of the text inside of tabs.
 
 tabs.title.format:
-  default: '{audio}{index}: {title}'
+  default: '{audio}{index}: {current_title}'
   type:
     name: FormatString
     fields:
       - perc
       - perc_raw
-      - title
+      - current_title
       - title_sep
       - index
       - id
@@ -1565,7 +1769,7 @@ tabs.title.format:
 
     * `{perc}`: Percentage as a string like `[10%]`.
     * `{perc_raw}`: Raw percentage, e.g. `10`.
-    * `{title}`: Title of the current web page.
+    * `{current_title}`: Title of the current web page.
     * `{title_sep}`: The string ` - ` if a title is set, empty otherwise.
     * `{index}`: Index of this tab.
     * `{id}`: Internal tab ID of this tab.
@@ -1584,7 +1788,7 @@ tabs.title.format_pinned:
     fields:
       - perc
       - perc_raw
-      - title
+      - current_title
       - title_sep
       - index
       - id
@@ -1671,10 +1875,40 @@ tabs.pinned.shrink:
   type: Bool
   desc: Shrink pinned tabs down to their contents.
 
+tabs.pinned.frozen:
+    type: Bool
+    default: True
+    desc: Force pinned tabs to stay at fixed URL.
+
+tabs.undo_stack_size:
+  default: 100
+  type:
+    name: Int
+    minval: -1
+    maxval: maxint
+  desc: Number of close tab actions to remember, per window (-1 for no maximum).
+
 tabs.wrap:
   default: true
   type: Bool
   desc: Wrap when changing tabs.
+
+tabs.focus_stack_size:
+  default: 10
+  type:
+    name: Int
+    minval: -1
+    maxval: maxint
+    zero_ok: false
+  desc: Maximum stack size to remember for tab switches (-1 for no maximum).
+
+tabs.tooltips:
+  default: true
+  type: Bool
+  desc: >-
+    Show tooltips on tabs.
+
+    Note this setting only affects windows opened after it has been set.
 
 ## url
 
@@ -1715,19 +1949,33 @@ url.searchengines:
   type:
     name: Dict
     required_keys: ['DEFAULT']
-    keytype: String
+    keytype:
+      name: String
+      forbidden: ' '
     valtype: SearchEngineUrl
-  desc: >-
+  desc: |
     Search engines which can be used via the address bar.
 
     Maps a search engine name (such as `DEFAULT`, or `ddg`) to a URL with a
     `{}` placeholder. The placeholder will be replaced by the search term, use
-    `{{` and `}}` for literal `{`/`}` signs.
+    `{{` and `}}` for literal `{`/`}` braces.
+
+    The following further placeholds are defined to configure how special
+    characters in the search terms are replaced by safe characters (called
+    'quoting'):
+
+    * `{}` and `{semiquoted}` quote everything except slashes; this is the most
+      sensible choice for almost all search engines (for the search term
+      `slash/and&amp` this placeholder expands to `slash/and%26amp`).
+    * `{quoted}` quotes all characters (for `slash/and&amp` this placeholder
+      expands to `slash%2Fand%26amp`).
+    * `{unquoted}` quotes nothing (for `slash/and&amp` this placeholder
+      expands to `slash/and&amp`).
 
     The search engine named `DEFAULT` is used when `url.auto_search` is turned
     on and something else than a URL was entered to be opened. Other search
     engines can be used by prepending the search engine name to the search
-    term, e.g.  `:open google qutebrowser`.
+    term, e.g. `:open google qutebrowser`.
 
 url.start_pages:
   type:
@@ -1769,7 +2017,7 @@ window.title_format:
     fields:
       - perc
       - perc_raw
-      - title
+      - current_title
       - title_sep
       - id
       - scroll_pos
@@ -1779,7 +2027,7 @@ window.title_format:
       - current_url
       - protocol
       - audio
-  default: '{perc}{title}{title_sep}qutebrowser'
+  default: '{perc}{current_title}{title_sep}qutebrowser'
   desc: |
     Format to use for the window title. The same placeholders like for
     `tabs.title.format` are defined.
@@ -1887,16 +2135,21 @@ colors.completion.item.selected.bg:
 colors.completion.item.selected.border.top:
   default: '#bbbb00'
   type: QssColor
-  desc: Top border color of the completion widget category headers.
+  desc: Top border color of the selected completion item.
 
 colors.completion.item.selected.border.bottom:
   default: '#bbbb00'
   type: QssColor
   desc: Bottom border color of the selected completion item.
 
+colors.completion.item.selected.match.fg:
+  default: '#ff4444'
+  type: QtColor
+  desc: Foreground color of the matched text in the selected completion item.
+
 colors.completion.match.fg:
   default: '#ff4444'
-  type: QssColor
+  type: QtColor
   desc: Foreground color of the matched text in the completion.
 
 colors.completion.scrollbar.fg:
@@ -1908,6 +2161,72 @@ colors.completion.scrollbar.bg:
   default: '#333333'
   type: QssColor
   desc: Color of the scrollbar in the completion view.
+
+colors.contextmenu.bg:
+  renamed: colors.contextmenu.menu.bg
+
+colors.contextmenu.fg:
+  renamed: colors.contextmenu.menu.fg
+
+colors.contextmenu.menu.bg:
+  type:
+    name: QssColor
+    none_ok: true
+  default: null
+  desc: >-
+    Background color of the context menu.
+
+    If set to null, the Qt default is used.
+
+colors.contextmenu.menu.fg:
+  type:
+    name: QssColor
+    none_ok: true
+  default: null
+  desc: >-
+    Foreground color of the context menu.
+
+    If set to null, the Qt default is used.
+
+colors.contextmenu.selected.bg:
+  type:
+    name: QssColor
+    none_ok: true
+  default: null
+  desc: >-
+    Background color of the context menu's selected item.
+
+    If set to null, the Qt default is used.
+
+colors.contextmenu.selected.fg:
+  type:
+    name: QssColor
+    none_ok: true
+  default: null
+  desc: >-
+    Foreground color of the context menu's selected item.
+
+    If set to null, the Qt default is used.
+
+colors.contextmenu.disabled.bg:
+  type:
+    name: QssColor
+    none_ok: true
+  default: null
+  desc: >-
+    Background color of disabled items in the context menu.
+
+    If set to null, the Qt default is used.
+
+colors.contextmenu.disabled.fg:
+  type:
+    name: QssColor
+    none_ok: true
+  default: null
+  desc: >-
+    Foreground color of disabled items in the context menu.
+
+    If set to null, the Qt default is used.
 
 colors.downloads.bar.bg:
   default: black
@@ -1970,7 +2289,7 @@ colors.hints.bg:
 
 colors.hints.match.fg:
   default: green
-  type: QssColor
+  type: QtColor
   desc: Font color for the matched part of hints.
 
 colors.keyhint.fg:
@@ -2109,7 +2428,7 @@ colors.statusbar.command.private.fg:
   desc: Foreground color of the statusbar in private browsing + command mode.
 
 colors.statusbar.command.private.bg:
-  default: grey
+  default: darkslategray
   type: QssColor
   desc: Background color of the statusbar in private browsing + command mode.
 
@@ -2171,7 +2490,7 @@ colors.statusbar.url.warn.fg:
 
 colors.tabs.bar.bg:
   default: '#555555'
-  type: QtColor
+  type: QssColor
   desc: Background color of the tab bar.
 
 colors.tabs.indicator.start:
@@ -2234,6 +2553,46 @@ colors.tabs.selected.even.bg:
   type: QtColor
   desc: Background color of selected even tabs.
 
+colors.tabs.pinned.odd.fg:
+  default: white
+  type: QtColor
+  desc: Foreground color of pinned unselected odd tabs.
+
+colors.tabs.pinned.odd.bg:
+  default: seagreen
+  type: QtColor
+  desc: Background color of pinned unselected odd tabs.
+
+colors.tabs.pinned.even.fg:
+  default: white
+  type: QtColor
+  desc: Foreground color of pinned unselected even tabs.
+
+colors.tabs.pinned.even.bg:
+  default: darkseagreen
+  type: QtColor
+  desc: Background color of pinned unselected even tabs.
+
+colors.tabs.pinned.selected.odd.fg:
+  default: white
+  type: QtColor
+  desc: Foreground color of pinned selected odd tabs.
+
+colors.tabs.pinned.selected.odd.bg:
+  default: black
+  type: QtColor
+  desc: Background color of pinned selected odd tabs.
+
+colors.tabs.pinned.selected.even.fg:
+  default: white
+  type: QtColor
+  desc: Foreground color of pinned selected even tabs.
+
+colors.tabs.pinned.selected.even.bg:
+  default: black
+  type: QtColor
+  desc: Background color of pinned selected even tabs.
+
 colors.webpage.bg:
   default: white
   type:
@@ -2242,78 +2601,279 @@ colors.webpage.bg:
   desc: "Background color for webpages if unset (or empty to use the theme's
     color)."
 
-## fonts
+colors.webpage.force_dark_color_scheme:
+  renamed: colors.webpage.prefers_color_scheme_dark
 
-fonts.monospace:
-  default: '"xos4 Terminus", Terminus, Monospace, "DejaVu Sans Mono", Monaco,
-    "Bitstream Vera Sans Mono", "Andale Mono", "Courier New", Courier,
-    "Liberation Mono", monospace, Fixed, Consolas, Terminal'
-  type: Font
+colors.webpage.prefers_color_scheme_dark:
+  default: false
+  type: Bool
+  desc: "Force `prefers-color-scheme: dark` colors for websites."
+  backend:
+    QtWebEngine: Qt 5.14
+    QtWebKit: false
+
+## dark mode
+
+# darkModeClassifierType is not exposed, as the icon classifier isn't actually
+# implemented in Chromium:
+#
+# https://source.chromium.org/chromium/chromium/src/+/master:third_party/blink/renderer/platform/graphics/dark_mode_icon_classifier.cc
+
+colors.webpage.darkmode.enabled:
+  default: false
+  type: Bool
   desc: >-
-    Default monospace fonts.
+    Render all web contents using a dark theme.
 
-    Whenever "monospace" is used in a font setting, it's replaced with the
-    fonts listed here.
+    Example configurations from Chromium's `chrome://flags`:
+
+
+    - "With simple HSL/CIELAB/RGB-based inversion": Set
+      `colors.webpage.darkmode.algorithm` accordingly.
+
+    - "With selective image inversion": Set
+      `colors.webpage.darkmode.policy.images` to `smart`.
+
+    - "With selective inversion of non-image elements": Set
+      `colors.webpage.darkmode.threshold.text` to 150 and
+      `colors.webpage.darkmode.threshold.background` to 205.
+
+    - "With selective inversion of everything": Combines the two variants
+      above.
+  restart: true
+  backend:
+    QtWebEngine: Qt 5.14
+    QtWebKit: false
+
+colors.webpage.darkmode.algorithm:
+  default: lightness-cielab
+  desc: "Which algorithm to use for modifying how colors are rendered with
+    darkmode."
+  type:
+    name: String
+    valid_values:
+      - lightness-cielab: Modify colors by converting them to CIELAB color
+            space and inverting the L value.
+      - lightness-hsl: Modify colors by converting them to the HSL color space
+            and inverting the lightness (i.e. the "L" in HSL).
+      - brightness-rgb: Modify colors by subtracting each of r, g, and b from
+            their maximum value.
+      # kSimpleInvertForTesting is not exposed, as it's equivalent to
+      # kInvertBrightness without gamma correction, and only available for
+      # Chromium's automated tests
+  restart: true
+  backend:
+    QtWebEngine: Qt 5.14
+    QtWebKit: false
+
+colors.webpage.darkmode.contrast:
+  default: 0.0
+  type:
+    name: Float
+    minval: -1.0
+    maxval: 1.0
+  desc: >-
+    Contrast for dark mode.
+
+    This only has an effect when `colors.webpage.darkmode.algorithm` is set to
+    `lightness-hsl` or `brightness-rgb`.
+  restart: true
+  backend:
+    QtWebEngine: Qt 5.14
+    QtWebKit: false
+
+colors.webpage.darkmode.policy.images:
+  default: never
+  type:
+    name: String
+    valid_values:
+      - always: Apply dark mode filter to all images.
+      - never: Never apply dark mode filter to any images.
+      - smart: Apply dark mode based on image content.
+  desc: Which images to apply dark mode to.
+  restart: true
+  backend:
+    QtWebEngine: Qt 5.14
+    QtWebKit: false
+
+colors.webpage.darkmode.policy.page:
+  default: smart
+  type:
+    name: String
+    valid_values:
+      - always: Apply dark mode filter to all frames, regardless of content.
+      - smart: Apply dark mode filter to frames based on background color.
+  desc: Which pages to apply dark mode to.
+  restart: true
+  backend:
+    QtWebEngine: Qt 5.14
+    QtWebKit: false
+
+colors.webpage.darkmode.threshold.text:
+  default: 256
+  type:
+    name: Int
+    minval: 0
+    maxval: 256
+  desc: >-
+      Threshold for inverting text with dark mode.
+
+      Text colors with brightness below this threshold will be inverted, and
+      above it will be left as in the original, non-dark-mode page. Set to 256
+      to always invert text color or to 0 to never invert text color.
+  restart: true
+  backend:
+    QtWebEngine: Qt 5.14
+    QtWebKit: false
+
+colors.webpage.darkmode.threshold.background:
+  default: 0
+  type:
+    name: Int
+    minval: 0
+    maxval: 256
+  desc: >-
+      Threshold for inverting background elements with dark mode.
+
+      Background elements with brightness above this threshold will be inverted,
+      and below it will be left as in the original, non-dark-mode page. Set to
+      256 to never invert the color or to 0 to always invert it.
+
+      Note: This behavior is the opposite of
+      `colors.webpage.darkmode.threshold.text`!
+  restart: true
+  backend:
+    QtWebEngine: Qt 5.14
+    QtWebKit: false
+
+colors.webpage.darkmode.grayscale.all:
+  default: false
+  type: Bool
+  desc: >-
+    Render all colors as grayscale.
+
+    This only has an effect when `colors.webpage.darkmode.algorithm` is set to
+    `lightness-hsl` or `brightness-rgb`.
+  restart: true
+  backend:
+    QtWebEngine: Qt 5.14
+    QtWebKit: false
+
+colors.webpage.darkmode.grayscale.images:
+  default: 0.0
+  type:
+    name: Float
+    minval: 0.0
+    maxval: 1.0
+  desc: >-
+    Desaturation factor for images in dark mode.
+
+    If set to 0, images are left as-is. If set to 1, images are completely
+    grayscale. Values between 0 and 1 desaturate the colors accordingly.
+  restart: true
+  backend:
+    QtWebEngine: Qt 5.14
+    QtWebKit: false
 
 # emacs: '
 
+## fonts
+
+fonts.default_family:
+  default: []
+  type:
+    name: ListOrValue
+    valtype: Font
+    none_ok: True
+  desc: >-
+    Default font families to use.
+
+    Whenever "default_family" is used in a font setting, it's replaced with the
+    fonts listed here.
+
+    If set to an empty value, a system-specific monospace default is used.
+
+fonts.default_size:
+  default: 10pt
+  type:
+    name: String
+    regex: '(?P<size>[0-9]+((\.[0-9]+)?[pP][tT]|[pP][xX]))'
+  desc: >-
+    Default font size to use.
+
+    Whenever "default_size" is used in a font setting, it's replaced with the
+    size listed here.
+
+    Valid values are either a float value with a "pt" suffix, or an integer
+    value with a "px" suffix.
+
 fonts.completion.entry:
-  default: 10pt monospace
+  default: default_size default_family
   type: Font
   desc: Font used in the completion widget.
 
 fonts.completion.category:
-  default: bold 10pt monospace
+  default: bold default_size default_family
   type: Font
   desc: Font used in the completion categories.
 
+fonts.contextmenu:
+  type:
+    name: Font
+    none_ok: true
+  default: null
+  desc: >-
+    Font used for the context menu.
+
+    If set to null, the Qt default is used.
+
 fonts.debug_console:
-  default: 10pt monospace
+  default: default_size default_family
   type: QtFont
   desc: Font used for the debugging console.
 
 fonts.downloads:
-  default: 10pt monospace
+  default: default_size default_family
   type: Font
   desc: Font used for the downloadbar.
 
 fonts.hints:
-  default: bold 10pt monospace
+  default: bold default_size default_family
   type: Font
   desc: Font used for the hints.
 
 fonts.keyhint:
-  default: 10pt monospace
+  default: default_size default_family
   type: Font
   desc: Font used in the keyhint widget.
 
 fonts.messages.error:
-  default: 10pt monospace
+  default: default_size default_family
   type: Font
   desc: Font used for error messages.
 
 fonts.messages.info:
-  default: 10pt monospace
+  default: default_size default_family
   type: Font
   desc: Font used for info messages.
 
 fonts.messages.warning:
-  default: 10pt monospace
+  default: default_size default_family
   type: Font
   desc: Font used for warning messages.
 
 fonts.prompts:
-  default: 10pt sans-serif
+  default: default_size sans-serif
   type: Font
   desc: Font used for prompts.
 
 fonts.statusbar:
-  default: 10pt monospace
+  default: default_size default_family
   type: Font
   desc: Font used in the statusbar.
 
 fonts.tabs:
-  default: 10pt monospace
+  default: default_size default_family
   type: QtFont
   desc: Font used in the tab bar.
 
@@ -2406,6 +2966,7 @@ bindings.key_mappings:
     <Ctrl-6>: <Ctrl-^>
     <Ctrl-M>: <Return>
     <Ctrl-J>: <Return>
+    <Ctrl-I>: <Tab>
     <Shift-Return>: <Return>
     <Enter>: <Return>
     <Shift-Enter>: <Return>
@@ -2503,6 +3064,7 @@ bindings.default:
       N: search-prev
       i: enter-mode insert
       v: enter-mode caret
+      V: enter-mode caret ;; toggle-selection --line
       "`": enter-mode set_mark
       "'": enter-mode jump_mark
       yy: yank
@@ -2513,6 +3075,8 @@ bindings.default:
       yD: yank domain -s
       yp: yank pretty-url
       yP: yank pretty-url -s
+      ym: yank inline [{title}]({url})
+      yM: yank inline [{title}]({url}) -s
       pp: open -- {clipboard}
       pP: open -- {primary}
       Pp: open -t -- {clipboard}
@@ -2606,7 +3170,7 @@ bindings.default:
       tIu: config-cycle -p -u {url} content.images ;; reload
     insert:
       <Ctrl-E>: open-editor
-      <Shift-Ins>: insert-text {primary}
+      <Shift-Ins>: insert-text -- {primary}
       <Escape>: leave-mode
     hint:
       <Return>: follow-hint
@@ -2675,11 +3239,14 @@ bindings.default:
       <Return>: prompt-accept
       y: prompt-accept yes
       n: prompt-accept no
+      Y: prompt-accept --save yes
+      N: prompt-accept --save no
       <Alt-Y>: prompt-yank
       <Alt-Shift-Y>: prompt-yank --sel
       <Escape>: leave-mode
     caret:
       v: toggle-selection
+      V: toggle-selection --line
       <Space>: toggle-selection
       <Ctrl-Space>: drop-selection
       c: enter-mode normal
@@ -2690,6 +3257,7 @@ bindings.default:
       e: move-to-end-of-word
       w: move-to-next-word
       b: move-to-prev-word
+      o: reverse-selection
       "]": move-to-start-of-next-block
       "[": move-to-start-of-prev-block
       "}": move-to-end-of-next-block

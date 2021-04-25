@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2015-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2015-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -63,7 +63,8 @@ class Request(testprocess.Line):
     def _check_status(self):
         """Check if the http status is what we expected."""
         path_to_statuses = {
-            '/favicon.ico': [HTTPStatus.NOT_FOUND],
+            '/favicon.ico': [HTTPStatus.OK, HTTPStatus.PARTIAL_CONTENT],
+
             '/does-not-exist': [HTTPStatus.NOT_FOUND],
             '/does-not-exist-2': [HTTPStatus.NOT_FOUND],
             '/404': [HTTPStatus.NOT_FOUND],
@@ -82,7 +83,8 @@ class Request(testprocess.Line):
         for i in range(15):
             path_to_statuses['/redirect/{}'.format(i)] = [HTTPStatus.FOUND]
         for suffix in ['', '1', '2', '3', '4', '5', '6']:
-            key = '/basic-auth/user{}/password{}'.format(suffix, suffix)
+            key = ('/basic-auth/user{suffix}/password{suffix}'
+                   .format(suffix=suffix))
             path_to_statuses[key] = [HTTPStatus.UNAUTHORIZED, HTTPStatus.OK]
 
         default_statuses = [HTTPStatus.OK, HTTPStatus.NOT_MODIFIED]
@@ -99,7 +101,7 @@ class Request(testprocess.Line):
         return NotImplemented
 
 
-@attr.s(frozen=True, cmp=False, hash=True)
+@attr.s(frozen=True, eq=False, hash=True)
 class ExpectedRequest:
 
     """Class to compare expected requests easily."""

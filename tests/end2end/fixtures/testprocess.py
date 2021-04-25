@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2015-2018 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2015-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -39,14 +39,10 @@ class InvalidLine(Exception):
 
     """Raised when the process prints a line which is not parsable."""
 
-    pass
-
 
 class ProcessExited(Exception):
 
     """Raised when the child process did exit."""
-
-    pass
 
 
 class WaitForTimeout(Exception):
@@ -78,7 +74,10 @@ def _render_log(data, *, verbose, threshold=100):
     data = [str(d) for d in data]
     is_exception = any('Traceback (most recent call last):' in line or
                        'Uncaught exception' in line for line in data)
-    if len(data) > threshold and not verbose and not is_exception:
+    if (len(data) > threshold and
+            not verbose and
+            not is_exception and
+            not utils.ON_CI):
         msg = '[{} lines suppressed, use -v to show]'.format(
             len(data) - threshold)
         data = [msg] + data[-threshold:]
@@ -271,7 +270,6 @@ class Process(QObject):
 
     def _after_start(self):
         """Do things which should be done immediately after starting."""
-        pass
 
     def before_test(self):
         """Restart process before a test if it exited before."""
@@ -315,7 +313,9 @@ class Process(QObject):
             self.proc.terminate()
 
         ok = self.proc.waitForFinished()
-        assert ok
+        if not ok:
+            self.proc.kill()
+            self.proc.waitForFinished()
 
     def is_running(self):
         """Check if the process is currently running."""
@@ -443,7 +443,6 @@ class Process(QObject):
         QuteProc._maybe_skip, and call _maybe_skip after every parsed message
         in wait_for (where it's most likely that new messages arrive).
         """
-        pass
 
     def wait_for(self, timeout=None, *, override_waited_for=False,
                  do_skip=False, divisor=1, after=None, **kwargs):
@@ -474,7 +473,7 @@ class Process(QObject):
             else:
                 timeout = 5000
 
-        timeout /= divisor
+        timeout //= divisor
 
         if not kwargs:
             raise TypeError("No keyword arguments given!")

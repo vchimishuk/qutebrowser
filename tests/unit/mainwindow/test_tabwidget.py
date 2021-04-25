@@ -1,5 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
+# Copyright 2015-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 # Copyright 2015-2018 Daniel Schadt
 #
 # This file is part of qutebrowser.
@@ -84,7 +85,7 @@ class TestTabWidget:
             widget.addTab(fake_web_tab(), 'foobar' + str(i))
 
         # Set pinned title format longer than unpinned
-        config_stub.val.tabs.title.format_pinned = "_" * 20
+        config_stub.val.tabs.title.format_pinned = "_" * 10
         config_stub.val.tabs.title.format = "_" * 2
         config_stub.val.tabs.pinned.shrink = shrink_pinned
         if vertical:
@@ -134,7 +135,15 @@ class TestTabWidget:
         config_stub.val.tabs.max_width = max_size
         assert widget.tabBar().tabRect(0).width() == max_size
 
-    @pytest.mark.parametrize("num_tabs", [4, 100])
+    def test_tab_stays_hidden(self, widget, fake_web_tab, config_stub):
+        assert widget.tabBar().isVisible()
+        config_stub.val.tabs.show = "never"
+        assert not widget.tabBar().isVisible()
+        for i in range(12):
+            widget.addTab(fake_web_tab(), 'foobar' + str(i))
+        assert not widget.tabBar().isVisible()
+
+    @pytest.mark.parametrize("num_tabs", [4, 70])
     @pytest.mark.parametrize("rev", [True, False])
     def test_add_remove_tab_benchmark(self, benchmark, widget,
                                       qtbot, fake_web_tab, num_tabs, rev):
