@@ -168,9 +168,12 @@ def raise_sqlite_error(msg, error):
     raise BugError(msg, error)
 
 
-def init(db_path):
+def open_db(db_path, conn_name=None):
     """Initialize the SQL database connection."""
-    database = QSqlDatabase.addDatabase('QSQLITE')
+    if conn_name:
+        database = QSqlDatabase.addDatabase('QSQLITE', conn_name)
+    else:
+        database = QSqlDatabase.addDatabase('QSQLITE')
     if not database.isValid():
         raise KnownError('Failed to add database. Are sqlite and Qt sqlite '
                          'support installed?')
@@ -182,7 +185,7 @@ def init(db_path):
         raise_sqlite_error(msg, error)
 
     global _db_user_version
-    version_int = Query('pragma user_version').run().value()
+    version_int = Query('pragma user_version', db=database).run().value()
     _db_user_version = UserVersion.from_int(version_int)
 
     if _db_user_version.major > _USER_VERSION.major:
@@ -195,31 +198,34 @@ def init(db_path):
         # Note we're *not* updating the _db_user_version global here. We still want
         # user_version_changed() to return True, as other modules (such as history.py)
         # use it to create the initial table structure.
-        Query(f'PRAGMA user_version = {_USER_VERSION.to_int()}').run()
+        Query(f'PRAGMA user_version = {_USER_VERSION.to_int()}', db=database).run()
 
-        # Enable write-ahead-logging and reduce disk write frequency
-        # see https://sqlite.org/pragma.html and issues #2930 and #3507
-        #
-        # We might already have done this (without a migration) in earlier versions, but
-        # as those are idempotent, let's make sure we run them once again.
-        Query("PRAGMA journal_mode=WAL").run()
-        Query("PRAGMA synchronous=NORMAL").run()
+    # Enable write-ahead-logging and reduce disk write frequency
+    # see https://sqlite.org/pragma.html and issues #2930 and #3507
+    #
+    # We might already have done this (without a migration) in earlier versions, but
+    # as those are idempotent, let's make sure we run them once again.
+    Query("PRAGMA journal_mode=WAL", db=database).run()
+    Query("PRAGMA synchronous=NORMAL", db=database).run()
+
+    return database
 
 
-def close():
+def close_db(name):
     """Close the SQL connection."""
-    QSqlDatabase.removeDatabase(QSqlDatabase.database().connectionName())
+    QSqlDatabase.removeDatabase(name)
 
 
 def version():
     """Return the sqlite version string."""
     try:
-        if not QSqlDatabase.database().isOpen():
-            init(':memory:')
-            ver = Query("select sqlite_version()").run().value()
-            close()
-            return ver
-        return Query("select sqlite_version()").run().value()
+        name = ':memory:'
+        db = open_db(name, 'version')
+        try:
+            return Query("select sqlite_version()", db=db).run().value()
+        finally:
+            del db
+            close_db(name)
     except KnownError as e:
         return 'UNAVAILABLE ({})'.format(e)
 
@@ -228,15 +234,17 @@ class Query:
 
     """A prepared SQL query."""
 
-    def __init__(self, querystr, forward_only=True):
+    def __init__(self, querystr, forward_only=True, db=None):
         """Prepare a new SQL query.
 
         Args:
             querystr: String to prepare query from.
             forward_only: Optimization for queries that will only step forward.
                           Must be false for completion queries.
+            db: QSqlDatabase database object to use or default if None.
         """
-        self.query = QSqlQuery(QSqlDatabase.database())
+        self._db = db or QSqlDatabase.database()
+        self.query = QSqlQuery(self._db)
 
         log.sql.vdebug(f'Preparing: {querystr}')  # type: ignore[attr-defined]
         ok = self.query.prepare(querystr)
@@ -293,8 +301,7 @@ class Query:
 
         self._bind_values(values)
 
-        db = QSqlDatabase.database()
-        ok = db.transaction()
+        ok = self._db.transaction()
         self._check_ok('transaction', ok)
 
         ok = self.query.execBatch()
@@ -302,10 +309,10 @@ class Query:
             self._check_ok('execBatch', ok)
         except Error:
             # Not checking the return value here, as we're failing anyways...
-            db.rollback()
+            self._db.rollback()
             raise
 
-        ok = db.commit()
+        ok = self._db.commit()
         self._check_ok('commit', ok)
 
     def value(self):
@@ -339,17 +346,19 @@ class SqlTable(QObject):
 
     changed = pyqtSignal()
 
-    def __init__(self, name, fields, constraints=None, parent=None):
+    def __init__(self, name, fields, constraints=None, parent=None, db=None):
         """Wrapper over a table in the SQL database.
 
         Args:
             name: Name of the table.
             fields: A list of field names.
             constraints: A dict mapping field names to constraint strings.
+            db: QSqlDatabase database object to use or default if None.
         """
         super().__init__(parent)
         self._name = name
-        self._create_table(fields, constraints)
+        self._db = db or QSqlDatabase.database()
+        self._create_table(fields, constraints, force=True)
 
     def _create_table(self, fields, constraints, *, force=False):
         """Create the table if the database is uninitialized.
@@ -364,26 +373,26 @@ class SqlTable(QObject):
         column_defs = ['{} {}'.format(field, constraints.get(field, ''))
                        for field in fields]
         q = Query("CREATE TABLE IF NOT EXISTS {name} ({column_defs})"
-                  .format(name=self._name, column_defs=', '.join(column_defs)))
+                  .format(name=self._name, column_defs=', '.join(column_defs)),
+                  db=self._db)
         q.run()
 
-    def create_index(self, name, field):
+    def create_index(self, name, field, unique=False):
         """Create an index over this table if the database is uninitialized.
 
         Args:
             name: Name of the index, should be unique.
             field: Name of the field to index.
         """
-        if not user_version_changed():
-            return
-
-        q = Query("CREATE INDEX IF NOT EXISTS {name} ON {table} ({field})"
-                  .format(name=name, table=self._name, field=field))
+        q = Query("CREATE {uniq} INDEX IF NOT EXISTS {name} ON {table} ({field})"
+                  .format(uniq='UNIQUE' if unique else '', name=name,
+                          table=self._name, field=field),
+                  db=self._db)
         q.run()
 
     def __iter__(self):
         """Iterate rows in the table."""
-        q = Query("SELECT * FROM {table}".format(table=self._name))
+        q = Query("SELECT * FROM {table}".format(table=self._name), db=self._db)
         q.run()
         return iter(q)
 
@@ -393,13 +402,14 @@ class SqlTable(QObject):
         Args:
             field: Field to match.
         """
-        return Query(
-            "SELECT EXISTS(SELECT * FROM {table} WHERE {field} = :val)"
-            .format(table=self._name, field=field))
+        s = "SELECT EXISTS(SELECT * FROM {table} WHERE {field} = :val)".format(
+            table=self._name, field=field)
+        return Query(s, db=self._db)
 
     def __len__(self):
         """Return the count of rows in the table."""
-        q = Query("SELECT count(*) FROM {table}".format(table=self._name))
+        q = Query("SELECT count(*) FROM {table}".format(table=self._name),
+                  db=self._db)
         q.run()
         return q.value()
 
@@ -419,18 +429,25 @@ class SqlTable(QObject):
         Return:
             The number of rows deleted.
         """
-        q = Query(f"DELETE FROM {self._name} where {field} = :val")
+        q = Query(f"DELETE FROM {self._name} where {field} = :val",
+                  db=self._db)
         q.run(val=value)
         if not q.rows_affected():
             raise KeyError('No row with {} = "{}"'.format(field, value))
         self.changed.emit()
 
-    def _insert_query(self, values, replace):
+    def _insert_query(self, values, replace=False, ignore=False):
         params = ', '.join(':{}'.format(key) for key in values)
-        verb = "REPLACE" if replace else "INSERT"
-        return Query("{verb} INTO {table} ({columns}) values({params})".format(
+        verb = 'INSERT'
+        if replace:
+            verb += ' OR REPLACE'
+        elif ignore:
+            verb += ' OR IGNORE'
+        s = "{verb} INTO {table} ({columns}) values ({params})".format(
             verb=verb, table=self._name, columns=', '.join(values),
-            params=params))
+            params=params)
+
+        return Query(s, db=self._db)
 
     def insert(self, values, replace=False):
         """Append a row to the table.
@@ -439,8 +456,7 @@ class SqlTable(QObject):
             values: A dict with a value to insert for each field name.
             replace: If set, replace existing values.
         """
-        q = self._insert_query(values, replace)
-        q.run(**values)
+        self._insert_query(values, replace).run(**values)
         self.changed.emit()
 
     def insert_batch(self, values, replace=False):
@@ -450,13 +466,55 @@ class SqlTable(QObject):
             values: A dict with a list of values to insert for each field name.
             replace: If true, overwrite rows with a primary key match.
         """
-        q = self._insert_query(values, replace)
-        q.run_batch(values)
+        self._insert_query(values, replace).run_batch(values)
         self.changed.emit()
+
+    def update(self, update, where, escape=True):
+        """Execute update rows statement.
+
+        Args:
+            update: column:value dict with new values to set
+            where: column:value dict for filtering
+            escape: enable new values SQL-escaping
+        """
+        if escape:
+            u = ', '.join(('{} = :{}'.format(k, k) for k in update.keys()))
+        else:
+            u = ', '.join(('{} = {}'.format(k, v) for k, v in update.items()))
+
+        s = 'UPDATE {} SET {}'.format(self._name, u)
+        if where:
+            w = ' AND '.join(('{} = :w_{}'.format(f, f) for f in where.keys()))
+            s += ' WHERE {}'.format(w)
+
+        p = update.copy()
+        p.update({'w_' + k: v for k, v in where.items()})
+
+        Query(s, db=self._db).run(**p)
+        self.changed.emit()
+
+    def upsert(self, values, index, update, escape=True):
+        """
+        Insert or update row if it is alredy exists.
+
+        Args:
+            values: column:value dict used for insert operation
+            index: column name used as a primary index
+            update: column:value dict used for update operation
+            escape: enable SQL-escaping for update operation
+        """
+        # TODO: ON CONFLICT can be used after updating to SQLite v3.24.0.
+        q = self._insert_query(values, ignore=True)
+        q.run(**values)
+
+        if not q.rows_affected() and update:
+            self.update(update, {index: values[index]}, escape)
+        else:
+            self.changed.emit()
 
     def delete_all(self):
         """Remove all rows from the table."""
-        Query("DELETE FROM {table}".format(table=self._name)).run()
+        Query("DELETE FROM {table}".format(table=self._name), db=self._db).run()
         self.changed.emit()
 
     def select(self, sort_by, sort_order, limit=-1):
@@ -472,6 +530,7 @@ class SqlTable(QObject):
         q = Query("SELECT * FROM {table} ORDER BY {sort_by} {sort_order} "
                   "LIMIT :limit"
                   .format(table=self._name, sort_by=sort_by,
-                          sort_order=sort_order))
+                          sort_order=sort_order),
+                  db=self._db)
         q.run(limit=limit)
         return q

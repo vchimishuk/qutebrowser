@@ -64,7 +64,7 @@ from qutebrowser.keyinput import macros, eventfilter
 from qutebrowser.mainwindow import mainwindow, prompt, windowundo
 from qutebrowser.misc import (ipc, savemanager, sessions, crashsignal,
                               earlyinit, sql, cmdhistory, backendproblem,
-                              objects, quitter)
+                              objects, quitter, executor)
 from qutebrowser.utils import (log, version, message, utils, urlutils, objreg,
                                resources, usertypes, standarddir,
                                error, qtutils, debug)
@@ -450,6 +450,9 @@ def _init_modules(*, args):
     Args:
         args: The argparse namespace.
     """
+    log.init.debug("Initializing task executor...")
+    executor.init()
+
     log.init.debug("Initializing logging from config...")
     log.init_from_config(config.val)
     config.instance.changed.connect(_on_config_changed)
@@ -477,18 +480,14 @@ def _init_modules(*, args):
     downloads.init()
     quitter.instance.shutting_down.connect(downloads.shutdown)
 
-    with debug.log_time("init", "Initializing SQL/history"):
-        try:
-            log.init.debug("Initializing SQL...")
-            sql.init(os.path.join(standarddir.data(), 'history.sqlite'))
-
-            log.init.debug("Initializing web history...")
-            history.init(objects.qapp)
-        except sql.KnownError as e:
-            error.handle_fatal_exc(e, 'Error initializing SQL',
-                                   pre_text='Error initializing SQL',
-                                   no_err_windows=args.no_err_windows)
-            sys.exit(usertypes.Exit.err_init)
+    try:
+        log.init.debug("Initializing web history...")
+        history.init(objects.qapp)
+    except sql.KnownError as e:
+        error.handle_fatal_exc(e, 'Error initializing SQL',
+                               pre_text='Error initializing SQL',
+                               no_err_windows=args.no_err_windows)
+        sys.exit(usertypes.Exit.err_init)
 
     log.init.debug("Initializing command history...")
     cmdhistory.init()
