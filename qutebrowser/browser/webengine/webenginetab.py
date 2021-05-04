@@ -996,21 +996,34 @@ class _WebEngineScripts(QObject):
     def connect_signals(self):
         """Connect signals to our private slots."""
         config.instance.changed.connect(self._on_config_changed)
+        self._tab.url_changed.connect(self._on_url_changed)
+        self._tab.load_finished.connect(self._on_load_finished)
 
         self._tab.search.cleared.connect(functools.partial(
-            self._update_stylesheet, searching=False))
-        self._tab.search.finished.connect(self._update_stylesheet)
+            self._on_search_changed, False))
+        self._tab.search.finished.connect(self._on_search_changed)
 
     @pyqtSlot(str)
     def _on_config_changed(self, option):
         if option in ['scrolling.bar', 'content.user_stylesheets']:
             self._init_stylesheet()
-            self._update_stylesheet()
+            self._update_stylesheet(self._tab.url())
+
+    @pyqtSlot()
+    def _on_load_finished(self):
+        self._update_stylesheet(self._tab.url())
+
+    @pyqtSlot(QUrl)
+    def _on_url_changed(self, url):
+        self._update_stylesheet(url)
 
     @pyqtSlot(bool)
-    def _update_stylesheet(self, searching=False):
+    def _on_search_changed(self, searching):
+        self._update_stylesheet(self._tab.url(), searching)
+
+    def _update_stylesheet(self, url, searching=False):
         """Update the custom stylesheet in existing tabs."""
-        css = shared.get_user_stylesheet(searching=searching)
+        css = shared.get_user_stylesheet(url, searching)
         code = javascript.assemble('stylesheet', 'set_css', css)
         self._tab.run_js_async(code)
 
@@ -1058,7 +1071,7 @@ class _WebEngineScripts(QObject):
         https://github.com/QupZilla/qupzilla/blob/v2.0/src/lib/app/mainapplication.cpp#L1063-L1101
         """
         self._remove_js('stylesheet')
-        css = shared.get_user_stylesheet()
+        css = shared.get_user_stylesheet(None)
         js_code = javascript.wrap_global(
             'stylesheet',
             resources.read_file('javascript/stylesheet.js'),
