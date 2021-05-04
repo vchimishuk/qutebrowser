@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2015-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2015-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Management of sessions - saved tabs/windows."""
 
@@ -23,24 +23,24 @@ import os
 import os.path
 import itertools
 import urllib
-import typing
-import glob
 import shutil
+import pathlib
+from typing import Any, Iterable, MutableMapping, MutableSequence, Optional, Union, cast
 
-from PyQt5.QtCore import QUrl, QObject, QPoint, QTimer, pyqtSlot
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import Qt, QUrl, QObject, QPoint, QTimer, QDateTime
 import yaml
 
 from qutebrowser.utils import (standarddir, objreg, qtutils, log, message,
-                               utils)
+                               utils, usertypes, version)
 from qutebrowser.api import cmdutils
 from qutebrowser.config import config, configfiles
 from qutebrowser.completion.models import miscmodels
 from qutebrowser.mainwindow import mainwindow
 from qutebrowser.qt import sip
+from qutebrowser.misc import objects, throttle
 
 
-_JsonType = typing.MutableMapping[str, typing.Any]
+_JsonType = MutableMapping[str, Any]
 
 
 class Sentinel:
@@ -49,9 +49,9 @@ class Sentinel:
 
 
 default = Sentinel()
-session_manager = typing.cast('SessionManager', None)
+session_manager = cast('SessionManager', None)
 
-ArgType = typing.Union[str, Sentinel]
+ArgType = Union[str, Sentinel]
 
 
 def init(parent=None):
@@ -60,28 +60,43 @@ def init(parent=None):
     Args:
         parent: The parent to use for the SessionManager.
     """
-    base_path = os.path.join(standarddir.data(), 'sessions')
+    base_path = pathlib.Path(standarddir.data()) / 'sessions'
 
     # WORKAROUND for https://github.com/qutebrowser/qutebrowser/issues/5359
-    backup_path = os.path.join(base_path, 'before-qt-515')
-    if (os.path.exists(base_path) and
-            not os.path.exists(backup_path) and
-            qtutils.version_check('5.15', compiled=False)):
-        os.mkdir(backup_path)
-        for filename in glob.glob(os.path.join(base_path, '*.yml')):
-            shutil.copy(filename, backup_path)
+    backup_path = base_path / 'before-qt-515'
 
-    try:
-        os.mkdir(base_path)
-    except FileExistsError:
-        pass
+    if objects.backend == usertypes.Backend.QtWebEngine:
+        webengine_version = version.qtwebengine_versions().webengine
+        do_backup = webengine_version >= utils.VersionNumber(5, 15)
+    else:
+        do_backup = False
+
+    if base_path.exists() and not backup_path.exists() and do_backup:
+        backup_path.mkdir()
+        for path in base_path.glob('*.yml'):
+            shutil.copy(path, backup_path)
+
+    base_path.mkdir(exist_ok=True)
 
     global session_manager
-    session_manager = SessionManager(base_path, parent)
+    session_manager = SessionManager(str(base_path), parent)
 
 
-@pyqtSlot()
-def shutdown():
+def shutdown(session: Optional[ArgType], last_window: bool) -> None:
+    """Handle a shutdown by saving sessions and removing the autosave file."""
+    if session_manager is None:
+        return  # type: ignore[unreachable]
+
+    try:
+        if session is not None:
+            session_manager.save(session, last_window=last_window,
+                                 load_next_time=True)
+        elif config.val.auto_save.session:
+            session_manager.save(default, last_window=last_window,
+                                 load_next_time=True)
+    except SessionError as e:
+        log.sessions.error("Failed to save session: {}".format(e))
+
     session_manager.delete_autosave()
 
 
@@ -108,7 +123,7 @@ class TabHistoryItem:
     """
 
     def __init__(self, url, title, *, original_url=None, active=False,
-                 user_data=None):
+                 user_data=None, last_visited=None):
         self.url = url
         if original_url is None:
             self.original_url = url
@@ -117,11 +132,13 @@ class TabHistoryItem:
         self.title = title
         self.active = active
         self.user_data = user_data
+        self.last_visited = last_visited
 
     def __repr__(self):
         return utils.get_repr(self, constructor=True, url=self.url,
                               original_url=self.original_url, title=self.title,
-                              active=self.active, user_data=self.user_data)
+                              active=self.active, user_data=self.user_data,
+                              last_visited=self.last_visited)
 
 
 class SessionManager(QObject):
@@ -138,10 +155,12 @@ class SessionManager(QObject):
 
     def __init__(self, base_path, parent=None):
         super().__init__(parent)
-        self.current = None  # type: typing.Optional[str]
+        self.current: Optional[str] = None
         self._base_path = base_path
         self._last_window_session = None
         self.did_load = False
+        # throttle autosaves to one minute apart
+        self.save_autosave = throttle.Throttle(self._save_autosave, 60 * 1000)
 
     def _get_session_path(self, name, check_exists=False):
         """Get the session path based on a session name or absolute path.
@@ -181,9 +200,9 @@ class SessionManager(QObject):
         Return:
             A dict with the saved data for this item.
         """
-        data = {
+        data: _JsonType = {
             'url': bytes(item.url().toEncoded()).decode('ascii'),
-        }  # type: _JsonType
+        }
 
         if item.title():
             data['title'] = item.title()
@@ -207,6 +226,8 @@ class SessionManager(QObject):
             # QtWebEngine
             user_data = None
 
+        data['last_visited'] = item.lastVisited().toString(Qt.ISODate)
+
         if tab.history.current_idx() == idx:
             pos = tab.scroller.pos_px()
             data['zoom'] = tab.zoom.factor()
@@ -229,7 +250,7 @@ class SessionManager(QObject):
             tab: The WebView to save.
             active: Whether the tab is currently active.
         """
-        data = {'history': []}  # type: _JsonType
+        data: _JsonType = {'history': []}
         if active:
             data['active'] = True
         for idx, item in enumerate(tab.history):
@@ -246,9 +267,9 @@ class SessionManager(QObject):
 
     def _save_all(self, *, only_window=None, with_private=False):
         """Get a dict with data for all windows/tabs."""
-        data = {'windows': []}  # type: _JsonType
+        data: _JsonType = {'windows': []}
         if only_window is not None:
-            winlist = [only_window]  # type: typing.Iterable[int]
+            winlist: Iterable[int] = [only_window]
         else:
             winlist = objreg.window_registry
 
@@ -265,8 +286,8 @@ class SessionManager(QObject):
             if tabbed_browser.is_private and not with_private:
                 continue
 
-            win_data = {}  # type: _JsonType
-            active_window = QApplication.instance().activeWindow()
+            win_data: _JsonType = {}
+            active_window = objects.qapp.activeWindow()
             if getattr(active_window, 'win_id', None) == win_id:
                 win_data['active'] = True
             win_data['geometry'] = bytes(main_window.saveGeometry())
@@ -335,7 +356,7 @@ class SessionManager(QObject):
             configfiles.state['general']['session'] = name
         return name
 
-    def save_autosave(self):
+    def _save_autosave(self):
         """Save the autosave session."""
         try:
             self.save('_autosave')
@@ -344,6 +365,8 @@ class SessionManager(QObject):
 
     def delete_autosave(self):
         """Delete the autosave session."""
+        # cancel any in-flight saves
+        self.save_autosave.cancel()
         try:
             self.delete('_autosave')
         except SessionNotFoundError:
@@ -357,10 +380,10 @@ class SessionManager(QObject):
         """Temporarily save the session for the last closed window."""
         self._last_window_session = self._save_all()
 
-    def _load_tab(self, new_tab, data):
+    def _load_tab(self, new_tab, data):  # noqa: C901
         """Load yaml data into a newly opened tab."""
         entries = []
-        lazy_load = []  # type: typing.MutableSequence[_JsonType]
+        lazy_load: MutableSequence[_JsonType] = []
         # use len(data['history'])
         # -> dropwhile empty if not session.lazy_session
         lazy_index = len(data['history'])
@@ -411,14 +434,25 @@ class SessionManager(QObject):
 
             active = histentry.get('active', False)
             url = QUrl.fromEncoded(histentry['url'].encode('ascii'))
+
             if 'original-url' in histentry:
                 orig_url = QUrl.fromEncoded(
                     histentry['original-url'].encode('ascii'))
             else:
                 orig_url = url
+
+            if histentry.get("last_visited"):
+                last_visited: Optional[QDateTime] = QDateTime.fromString(
+                    histentry.get("last_visited"),
+                    Qt.ISODate,
+                )
+            else:
+                last_visited = None
+
             entry = TabHistoryItem(url=url, original_url=orig_url,
                                    title=histentry['title'], active=active,
-                                   user_data=user_data)
+                                   user_data=user_data,
+                                   last_visited=last_visited)
             entries.append(entry)
             if active:
                 new_tab.title_changed.emit(histentry['title'])
@@ -442,8 +476,7 @@ class SessionManager(QObject):
             if tab.get('active', False):
                 tab_to_focus = i
             if new_tab.data.pinned:
-                tabbed_browser.widget.set_tab_pinned(new_tab,
-                                                     new_tab.data.pinned)
+                new_tab.set_pinned(True)
         if tab_to_focus is not None:
             tabbed_browser.widget.setCurrentIndex(tab_to_focus)
         if win.get('active', False):

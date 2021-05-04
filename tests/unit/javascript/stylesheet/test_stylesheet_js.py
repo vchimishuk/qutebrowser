@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2017-2020 Jay Kamat <jaygkamat@gmail.com>
+# Copyright 2017-2021 Jay Kamat <jaygkamat@gmail.com>
 #
 # This file is part of qutebrowser.
 #
@@ -15,11 +15,11 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Tests for stylesheet.js."""
 
-import os
+import pathlib
 import pytest
 
 QtWebEngineWidgets = pytest.importorskip("PyQt5.QtWebEngineWidgets")
@@ -49,8 +49,8 @@ class StylesheetTester:
 
     def init_stylesheet(self, css_file="green.css"):
         """Initialize the stylesheet with a provided css file."""
-        css_path = os.path.join(os.path.dirname(__file__), css_file)
-        self.config_stub.val.content.user_stylesheets = css_path
+        css_path = pathlib.Path(__file__).parent / css_file
+        self.config_stub.val.content.user_stylesheets = str(css_path)
 
     def set_css(self, css):
         """Set document style to `css` via stylesheet.js."""

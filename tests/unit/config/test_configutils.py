@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2018-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2018-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,16 +15,17 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 import hypothesis
 from hypothesis import strategies
 import pytest
 from PyQt5.QtCore import QUrl
+from PyQt5.QtWidgets import QLabel
 
 from qutebrowser.config import configutils, configdata, configtypes, configexc
 from qutebrowser.utils import urlmatch, usertypes, qtutils
-from tests.helpers import utils
+from tests.helpers import testutils
 
 
 @pytest.fixture
@@ -276,7 +277,7 @@ def test_no_pattern_support(func, opt, pattern):
 
 
 def test_add_url_benchmark(values, benchmark):
-    blocked_hosts = list(utils.blocked_hosts())
+    blocked_hosts = list(testutils.blocked_hosts())
 
     def _add_blocked():
         for line in blocked_hosts:
@@ -293,7 +294,7 @@ def test_add_url_benchmark(values, benchmark):
 def test_domain_lookup_sparse_benchmark(url, values, benchmark):
     url = QUrl(url)
     values.add(False, urlmatch.UrlPattern("*.foo.bar.baz"))
-    for line in utils.blocked_hosts():
+    for line in testutils.blocked_hosts():
         values.add(False, urlmatch.UrlPattern(line))
 
     benchmark(lambda: values.get_for_url(url))
@@ -364,3 +365,45 @@ class TestFontFamilies:
             assert family
 
         str(families)
+
+    def test_system_default_basics(self, qapp):
+        families = configutils.FontFamilies.from_system_default()
+        assert len(families) == 1
+        assert str(families)
+
+    def test_system_default_rendering(self, qtbot):
+        families = configutils.FontFamilies.from_system_default()
+
+        label = QLabel()
+        qtbot.add_widget(label)
+        label.setText("Hello World")
+
+        stylesheet = f'font-family: {families.to_str(quote=True)}'
+        print(stylesheet)
+        label.setStyleSheet(stylesheet)
+
+        with qtbot.wait_exposed(label):
+            # Needed so the font gets calculated
+            label.show()
+        info = label.fontInfo()
+
+        # Check the requested font to make sure CSS parsing worked
+        assert label.font().family() == families.family
+
+        # Try to find out whether the monospace font did a fallback on a non-monospace
+        # font...
+        fallback_label = QLabel()
+        qtbot.add_widget(label)
+        fallback_label.setText("fallback")
+
+        with qtbot.wait_exposed(fallback_label):
+            # Needed so the font gets calculated
+            fallback_label.show()
+
+        fallback_family = fallback_label.fontInfo().family()
+        print(f'fallback: {fallback_family}')
+        if info.family() == fallback_family:
+            return
+
+        # If we didn't fall back, we should've gotten a fixed-pitch font.
+        assert info.fixedPitch(), info.family()

@@ -1,5 +1,5 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
-# Copyright 2017-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2017-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 
 # This file is part of qutebrowser.
 #
@@ -14,7 +14,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Tests for qutebrowser.config.configfiles."""
 
@@ -22,13 +22,14 @@ import os
 import sys
 import unittest.mock
 import textwrap
+import logging
 
 import pytest
 from PyQt5.QtCore import QSettings
 
 from qutebrowser.config import (config, configfiles, configexc, configdata,
                                 configtypes)
-from qutebrowser.utils import utils, usertypes, urlmatch
+from qutebrowser.utils import utils, usertypes, urlmatch, standarddir
 from qutebrowser.keyinput import keyutils
 
 
@@ -83,6 +84,8 @@ def autoconfig(config_tmpdir):
      'version = 1.2.3\n'
      '\n'
      '[geometry]\n'
+     '\n'
+     '[inspector]\n'
      '\n'),
     ('[general]\n'
      'fooled = true',
@@ -92,6 +95,8 @@ def autoconfig(config_tmpdir):
      'version = 1.2.3\n'
      '\n'
      '[geometry]\n'
+     '\n'
+     '[inspector]\n'
      '\n'),
     ('[general]\n'
      'foobar = 42',
@@ -102,6 +107,8 @@ def autoconfig(config_tmpdir):
      'version = 1.2.3\n'
      '\n'
      '[geometry]\n'
+     '\n'
+     '[inspector]\n'
      '\n'),
     (None,
      True,
@@ -111,6 +118,8 @@ def autoconfig(config_tmpdir):
      'newval = 23\n'
      '\n'
      '[geometry]\n'
+     '\n'
+     '[inspector]\n'
      '\n'),
 ])
 def test_state_config(fake_save_manager, data_tmpdir, monkeypatch,
@@ -136,6 +145,18 @@ def test_state_config(fake_save_manager, data_tmpdir, monkeypatch,
     fake_save_manager.add_saveable('state-config', unittest.mock.ANY)
 
 
+@pytest.fixture
+def state_writer(data_tmpdir):
+    statefile = data_tmpdir / 'state'
+
+    def _write(key, value):
+        data = ('[general]\n'
+                f'{key} = {value}')
+        statefile.write_text(data, 'utf-8')
+
+    return _write
+
+
 @pytest.mark.parametrize('old_version, new_version, changed', [
     (None, '5.12.1', False),
     ('5.12.1', '5.12.1', False),
@@ -144,18 +165,75 @@ def test_state_config(fake_save_manager, data_tmpdir, monkeypatch,
     ('5.13.0', '5.12.2', True),
     ('5.12.2', '5.13.0', True),
 ])
-def test_qt_version_changed(data_tmpdir, monkeypatch,
+def test_qt_version_changed(state_writer, monkeypatch,
                             old_version, new_version, changed):
     monkeypatch.setattr(configfiles, 'qVersion', lambda: new_version)
 
-    statefile = data_tmpdir / 'state'
     if old_version is not None:
-        data = ('[general]\n'
-                'qt_version = {}'.format(old_version))
-        statefile.write_text(data, 'utf-8')
+        state_writer('qt_version', old_version)
 
     state = configfiles.StateConfig()
     assert state.qt_version_changed == changed
+
+
+@pytest.mark.parametrize('old_version, new_version, expected', [
+    (None, '2.0.0', configfiles.VersionChange.unknown),
+    ('1.14.1', '1.14.1', configfiles.VersionChange.equal),
+    ('1.14.0', '1.14.1', configfiles.VersionChange.patch),
+
+    ('1.14.0', '1.15.0', configfiles.VersionChange.minor),
+    ('1.14.0', '1.15.1', configfiles.VersionChange.minor),
+    ('1.14.1', '1.15.2', configfiles.VersionChange.minor),
+    ('1.14.2', '1.15.1', configfiles.VersionChange.minor),
+
+    ('1.14.1', '2.0.0', configfiles.VersionChange.major),
+    ('1.14.1', '2.1.0', configfiles.VersionChange.major),
+    ('1.14.1', '2.0.1', configfiles.VersionChange.major),
+    ('1.14.1', '2.1.1', configfiles.VersionChange.major),
+
+    ('2.1.1', '1.14.1', configfiles.VersionChange.downgrade),
+    ('2.0.0', '1.14.1', configfiles.VersionChange.downgrade),
+])
+def test_qutebrowser_version_changed(
+        state_writer, monkeypatch, old_version, new_version, expected):
+    monkeypatch.setattr(configfiles.qutebrowser, '__version__', new_version)
+
+    if old_version is not None:
+        state_writer('version', old_version)
+
+    state = configfiles.StateConfig()
+    assert state.qutebrowser_version_changed == expected
+
+
+def test_qutebrowser_version_unparsable(state_writer, monkeypatch, caplog):
+    state_writer('version', 'blabla')
+
+    with caplog.at_level(logging.WARNING):
+        state = configfiles.StateConfig()
+
+    assert caplog.messages == ['Unable to parse old version blabla']
+    assert state.qutebrowser_version_changed == configfiles.VersionChange.unknown
+
+
+@pytest.mark.parametrize('value, filterstr, matches', [
+    (configfiles.VersionChange.major, 'never', False),
+    (configfiles.VersionChange.minor, 'never', False),
+    (configfiles.VersionChange.patch, 'never', False),
+
+    (configfiles.VersionChange.major, 'major', True),
+    (configfiles.VersionChange.minor, 'major', False),
+    (configfiles.VersionChange.patch, 'major', False),
+
+    (configfiles.VersionChange.major, 'minor', True),
+    (configfiles.VersionChange.minor, 'minor', True),
+    (configfiles.VersionChange.patch, 'minor', False),
+
+    (configfiles.VersionChange.major, 'patch', True),
+    (configfiles.VersionChange.minor, 'patch', True),
+    (configfiles.VersionChange.patch, 'patch', True),
+])
+def test_version_change_filter(value, filterstr, matches):
+    assert value.matches_filter(filterstr) == matches
 
 
 @pytest.fixture
@@ -321,6 +399,18 @@ class TestYaml:
         assert error.text == text
         assert str(error.exception).splitlines()[0] == exception
         assert error.traceback is None
+
+    @pytest.mark.parametrize('value', [
+        42,  # value is not a dict
+        {'https://': True},  # Invalid pattern
+        {True: True},  # No string pattern
+    ])
+    def test_invalid_in_migrations(self, value, yaml, autoconfig):
+        """Make sure migrations work fine with an invalid structure."""
+        config = {key: value for key in configdata.DATA}
+        autoconfig.write(config)
+        with pytest.raises(configexc.ConfigFileErrors):
+            yaml.load()
 
     def test_legacy_migration(self, yaml, autoconfig, qtbot):
         autoconfig.write_toplevel({
@@ -501,7 +591,7 @@ class TestYamlMigrations:
         ('tabs.favicons.show', 'always', 'always'),
 
         ('scrolling.bar', True, 'always'),
-        ('scrolling.bar', False, 'when-searching'),
+        ('scrolling.bar', False, 'overlay'),
         ('scrolling.bar', 'always', 'always'),
 
         ('qt.force_software_rendering', True, 'software-opengl'),
@@ -510,6 +600,21 @@ class TestYamlMigrations:
     ])
     def test_bool(self, migration_test, setting, old, new):
         migration_test(setting, old, new)
+
+    @pytest.mark.parametrize('ssl_strict, certificate_errors', [
+        (True, 'block'),
+        (False, 'load-insecurely'),
+        ('ask', 'ask'),
+    ])
+    def test_ssl_strict(self, yaml, autoconfig, ssl_strict, certificate_errors):
+        autoconfig.write({'content.ssl_strict': {'global': ssl_strict}})
+
+        yaml.load()
+        yaml._save()
+
+        data = autoconfig.read()
+        assert 'content.ssl_strict' not in data
+        assert data['content.tls.certificate_errors']['global'] == certificate_errors
 
     @pytest.mark.parametrize('setting', [
         'tabs.title.format',
@@ -526,6 +631,24 @@ class TestYamlMigrations:
     ])
     def test_title_format(self, migration_test, setting, old, new):
         migration_test(setting, old, new)
+
+    @pytest.mark.parametrize('setting', [
+        'colors.webpage.force_dark_color_scheme',
+        'colors.webpage.prefers_color_scheme_dark',
+    ])
+    @pytest.mark.parametrize('old, new', [
+        (True, 'dark'),
+        (False, 'auto'),
+    ])
+    def test_preferred_color_scheme(self, autoconfig, yaml, setting, old, new):
+        autoconfig.write({setting: {'global': old}})
+
+        yaml.load()
+        yaml._save()
+
+        data = autoconfig.read()
+        assert setting not in data
+        assert data['colors.webpage.preferred_color_scheme']['global'] == new
 
     @pytest.mark.parametrize('old, new', [
         (None, ('Mozilla/5.0 ({os_info}) '
@@ -578,8 +701,6 @@ class TestYamlMigrations:
     @pytest.mark.parametrize('setting, old, new', [
         # Font
         ('fonts.hints', '10pt monospace', '10pt default_family'),
-        # QtFont
-        ('fonts.debug_console', '10pt monospace', '10pt default_family'),
         # String
         ('content.headers.accept_language', 'x monospace', 'x monospace'),
         # Not at end of string
@@ -588,29 +709,81 @@ class TestYamlMigrations:
     def test_font_replacements(self, migration_test, setting, old, new):
         migration_test(setting, old, new)
 
+    def test_fonts_tabs(self, yaml, autoconfig):
+        val = '10pt default_family'
+        autoconfig.write({'fonts.tabs': {'global': val}})
+
+        yaml.load()
+        yaml._save()
+
+        data = autoconfig.read()
+        assert data['fonts.tabs.unselected']['global'] == val
+        assert data['fonts.tabs.selected']['global'] == val
+
+    def test_content_media_capture(self, yaml, autoconfig):
+        val = 'ask'
+        autoconfig.write({'content.media_capture': {'global': val}})
+
+        yaml.load()
+        yaml._save()
+
+        data = autoconfig.read()
+        for setting in ['content.media.audio_capture',
+                        'content.media.audio_video_capture',
+                        'content.media.video_capture']:
+            assert data[setting]['global'] == val
+
+    def test_empty_pattern(self, yaml, autoconfig):
+        valid_pattern = 'https://example.com/*'
+        invalid_pattern = '*://*./*'
+        setting = 'content.javascript.enabled'
+
+        autoconfig.write({
+            setting: {
+                'global': False,
+                invalid_pattern: True,
+                valid_pattern: True,
+            }
+        })
+
+        yaml.load()
+        yaml._save()
+
+        data = autoconfig.read()
+        assert not data[setting]['global']
+        assert invalid_pattern not in data[setting]
+        assert data[setting][valid_pattern]
+
 
 class ConfPy:
 
     """Helper class to get a confpy fixture."""
 
-    def __init__(self, tmpdir, filename: str = "config.py"):
-        self._file = tmpdir / filename
+    def __init__(self, tmp_path, filename: str = "config.py"):
+        self._file = tmp_path / filename
         self.filename = str(self._file)
 
     def write(self, *lines):
         text = '\n'.join(lines)
-        self._file.write_text(text, 'utf-8', ensure=True)
+        self._file.write_text(text, 'utf-8')
 
-    def read(self, error=False):
+    def read(self, error=False, warn_autoconfig=False):
         """Read the config.py via configfiles and check for errors."""
         if error:
             with pytest.raises(configexc.ConfigFileErrors) as excinfo:
-                configfiles.read_config_py(self.filename)
+                configfiles.read_config_py(
+                    self.filename,
+                    warn_autoconfig=warn_autoconfig,
+                )
             errors = excinfo.value.errors
             assert len(errors) == 1
             return errors[0]
         else:
-            configfiles.read_config_py(self.filename, raising=True)
+            configfiles.read_config_py(
+                self.filename,
+                raising=True,
+                warn_autoconfig=warn_autoconfig,
+            )
             return None
 
     def write_qbmodule(self):
@@ -619,8 +792,8 @@ class ConfPy:
 
 
 @pytest.fixture
-def confpy(tmpdir, config_tmpdir, data_tmpdir, config_stub, key_config_stub):
-    return ConfPy(tmpdir)
+def confpy(tmp_path, config_tmpdir, data_tmpdir, config_stub, key_config_stub):
+    return ConfPy(tmp_path)
 
 
 class TestConfigPyModules:
@@ -628,8 +801,8 @@ class TestConfigPyModules:
     pytestmark = pytest.mark.usefixtures('config_stub', 'key_config_stub')
 
     @pytest.fixture
-    def qbmodulepy(self, tmpdir):
-        return ConfPy(tmpdir, filename="qbmodule.py")
+    def qbmodulepy(self, tmp_path):
+        return ConfPy(tmp_path, filename="qbmodule.py")
 
     @pytest.fixture(autouse=True)
     def restore_sys_path(self):
@@ -637,7 +810,7 @@ class TestConfigPyModules:
         yield
         sys.path = old_path
 
-    def test_bind_in_module(self, confpy, qbmodulepy, tmpdir):
+    def test_bind_in_module(self, confpy, qbmodulepy, tmp_path):
         qbmodulepy.write(
             'def run(config):',
             '    config.bind(",a", "message-info foo", mode="normal")')
@@ -646,9 +819,9 @@ class TestConfigPyModules:
         expected = {'normal': {',a': 'message-info foo'}}
         assert config.instance.get_obj('bindings.commands') == expected
         assert "qbmodule" not in sys.modules.keys()
-        assert tmpdir not in sys.path
+        assert tmp_path not in sys.path
 
-    def test_restore_sys_on_err(self, confpy, qbmodulepy, tmpdir):
+    def test_restore_sys_on_err(self, confpy, qbmodulepy, tmp_path):
         confpy.write_qbmodule()
         qbmodulepy.write('def run(config):',
                          '    1/0')
@@ -657,9 +830,9 @@ class TestConfigPyModules:
         assert error.text == "Unhandled exception"
         assert isinstance(error.exception, ZeroDivisionError)
         assert "qbmodule" not in sys.modules.keys()
-        assert tmpdir not in sys.path
+        assert tmp_path not in sys.path
 
-    def test_fail_on_nonexistent_module(self, confpy, qbmodulepy, tmpdir):
+    def test_fail_on_nonexistent_module(self, confpy, qbmodulepy, tmp_path):
         qbmodulepy.write('def run(config):',
                          '    pass')
         confpy.write('import foobar',
@@ -674,13 +847,13 @@ class TestConfigPyModules:
         assert tblines[0] == "Traceback (most recent call last):"
         assert tblines[-1].endswith("Error: No module named 'foobar'")
 
-    def test_no_double_if_path_exists(self, confpy, qbmodulepy, tmpdir):
-        sys.path.insert(0, tmpdir)
+    def test_no_double_if_path_exists(self, confpy, qbmodulepy, tmp_path):
+        sys.path.insert(0, tmp_path)
         confpy.write('import sys',
                      'if sys.path[0] in sys.path[1:]:',
                      '    raise Exception("Path not expected")')
         confpy.read()
-        assert sys.path.count(tmpdir) == 1
+        assert sys.path.count(tmp_path) == 1
 
 
 class TestConfigPy:
@@ -744,9 +917,7 @@ class TestConfigPy:
     ])
     def test_get(self, confpy, set_first, get_line):
         """Test whether getting options works correctly."""
-        # pylint: disable=bad-config-option
-        config.val.colors.hints.fg = 'green'
-        # pylint: enable=bad-config-option
+        config.val.colors.hints.fg = 'green'  # pylint: disable=bad-config-option
         if set_first:
             confpy.write('c.colors.hints.fg = "red"',
                          'assert {} == "red"'.format(get_line))
@@ -848,9 +1019,9 @@ class TestConfigPy:
         confpy.read()
         assert config.instance.get_obj(option)[-1] == value
 
-    def test_oserror(self, tmpdir, data_tmpdir, config_tmpdir):
+    def test_oserror(self, tmp_path, data_tmpdir, config_tmpdir):
         with pytest.raises(configexc.ConfigFileErrors) as excinfo:
-            configfiles.read_config_py(str(tmpdir / 'foo'))
+            configfiles.read_config_py(str(tmp_path / 'foo'))
 
         assert len(excinfo.value.errors) == 1
         error = excinfo.value.errors[0]
@@ -890,6 +1061,18 @@ class TestConfigPy:
         # Starting with the new PEG-based parser in Python 3.9, the caret
         # points at the location *after* the +
         assert "    ^" in tblines or "     ^" in tblines
+
+    def test_load_autoconfig_warning(self, confpy):
+        confpy.write('')
+        with pytest.raises(configexc.ConfigFileErrors) as excinfo:
+            configfiles.read_config_py(confpy.filename, warn_autoconfig=True)
+        assert len(excinfo.value.errors) == 1
+        error = excinfo.value.errors[0]
+        assert error.text == "autoconfig loading not specified"
+        exception_text = ('Your config.py should call either `config.load_autoconfig()`'
+                          ' (to load settings configured via the GUI) or '
+                          '`config.load_autoconfig(False)` (to not do so)')
+        assert str(error.exception) == exception_text
 
     def test_unhandled_exception(self, confpy):
         confpy.write("1/0")
@@ -986,12 +1169,12 @@ class TestConfigPy:
         assert error.traceback is not None
 
     @pytest.mark.parametrize('location', ['abs', 'rel'])
-    def test_source(self, tmpdir, confpy, location):
+    def test_source(self, tmp_path, confpy, location):
         if location == 'abs':
-            subfile = tmpdir / 'subfile.py'
+            subfile = tmp_path / 'subfile.py'
             arg = str(subfile)
         else:
-            subfile = tmpdir / 'config' / 'subfile.py'
+            subfile = tmp_path / 'config' / 'subfile.py'
             arg = 'subfile.py'
 
         subfile.write_text("c.content.javascript.enabled = False",
@@ -1001,8 +1184,26 @@ class TestConfigPy:
 
         assert not config.instance.get_obj('content.javascript.enabled')
 
-    def test_source_errors(self, tmpdir, confpy):
-        subfile = tmpdir / 'config' / 'subfile.py'
+    def test_source_configpy_arg(self, tmp_path, data_tmpdir, monkeypatch):
+        alt_filename = 'alt-config.py'
+
+        alt_confpy_dir = tmp_path / 'alt-confpy-dir'
+        alt_confpy_dir.mkdir()
+        monkeypatch.setattr(standarddir, 'config_py',
+                            lambda: str(alt_confpy_dir / alt_filename))
+
+        subfile = alt_confpy_dir / 'subfile.py'
+        subfile.write_text("c.content.javascript.enabled = False",
+                           encoding='utf-8')
+
+        alt_confpy = ConfPy(alt_confpy_dir, alt_filename)
+        alt_confpy.write("config.source('subfile.py')")
+        alt_confpy.read()
+
+        assert not config.instance.get_obj('content.javascript.enabled')
+
+    def test_source_errors(self, tmp_path, confpy):
+        subfile = tmp_path / 'config' / 'subfile.py'
         subfile.write_text("c.foo = 42", encoding='utf-8')
         confpy.write("config.source('subfile.py')")
         error = confpy.read(error=True)
@@ -1010,8 +1211,8 @@ class TestConfigPy:
         assert error.text == "While setting 'foo'"
         assert isinstance(error.exception, configexc.NoOptionError)
 
-    def test_source_multiple_errors(self, tmpdir, confpy):
-        subfile = tmpdir / 'config' / 'subfile.py'
+    def test_source_multiple_errors(self, tmp_path, confpy):
+        subfile = tmp_path / 'config' / 'subfile.py'
         subfile.write_text("c.foo = 42", encoding='utf-8')
         confpy.write("config.source('subfile.py')", "c.bar = 23")
 
@@ -1030,6 +1231,21 @@ class TestConfigPy:
 
         assert error.text == "Error while reading doesnotexist.py"
         assert isinstance(error.exception, FileNotFoundError)
+
+    @pytest.mark.parametrize('reverse', [True, False])
+    def test_source_warn_autoconfig(self, tmp_path, confpy, reverse):
+        subfile = tmp_path / 'config' / 'subfile.py'
+        subfile.write_text("c.content.javascript.enabled = False",
+                           encoding='utf-8')
+        lines = [
+            "config.source('subfile.py')",
+            "config.load_autoconfig(False)",
+        ]
+        if reverse:
+            lines.reverse()
+
+        confpy.write(*lines)
+        confpy.read(warn_autoconfig=True)
 
 
 class TestConfigPyWriter:
@@ -1052,12 +1268,19 @@ class TestConfigPyWriter:
 
         assert text == textwrap.dedent("""
             # Autogenerated config.py
+            #
+            # NOTE: config.py is intended for advanced users who are comfortable
+            # with manually migrating the config file on qutebrowser upgrades. If
+            # you prefer, you can also configure qutebrowser using the
+            # :set/:bind/:config-* commands without having to write a config.py
+            # file.
+            #
             # Documentation:
             #   qute://help/configuring.html
             #   qute://help/settings.html
 
-            # Uncomment this to still load settings configured via autoconfig.yml
-            # config.load_autoconfig()
+            # Change the argument to True to still load settings configured via autoconfig.yml
+            config.load_autoconfig(False)
 
             # This is an option description.  Nullam eu ante vel est convallis
             # dignissim. Fusce suscipit, wisi nec facilisis facilisis, est dui
@@ -1109,7 +1332,7 @@ class TestConfigPyWriter:
         lines = list(writer._gen_lines())
 
         assert "## Autogenerated config.py" in lines
-        assert "# config.load_autoconfig()" in lines
+        assert "# config.load_autoconfig(True)" in lines
         assert "# c.opt = 'val'" in lines
         assert "## Bindings for normal mode" in lines
         assert "# config.bind(',x', 'message-info normal')" in lines
@@ -1156,17 +1379,10 @@ class TestConfigPyWriter:
     def test_empty(self):
         writer = configfiles.ConfigPyWriter(options=[], bindings={},
                                             commented=False)
-        text = '\n'.join(writer._gen_lines())
-        expected = textwrap.dedent("""
-            # Autogenerated config.py
-            # Documentation:
-            #   qute://help/configuring.html
-            #   qute://help/settings.html
-
-            # Uncomment this to still load settings configured via autoconfig.yml
-            # config.load_autoconfig()
-        """).lstrip()
-        assert text == expected
+        lines = list(writer._gen_lines())
+        assert lines[0] == '# Autogenerated config.py'
+        assert lines[-2] == 'config.load_autoconfig(False)'
+        assert not lines[-1]
 
     def test_pattern(self):
         opt = configdata.Option(
@@ -1182,8 +1398,8 @@ class TestConfigPyWriter:
         expected = "config.set('opt', 'ask', 'https://www.example.com/')"
         assert expected in text
 
-    def test_write(self, tmpdir):
-        pyfile = tmpdir / 'config.py'
+    def test_write(self, tmp_path):
+        pyfile = tmp_path / 'config.py'
         writer = configfiles.ConfigPyWriter(options=[], bindings={},
                                             commented=False)
         writer.write(str(pyfile))

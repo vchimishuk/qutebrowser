@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2015-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2015-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,7 +15,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Steps for bdd-like tests."""
 
@@ -37,7 +37,7 @@ import pytest_bdd as bdd
 import qutebrowser
 from qutebrowser.utils import log, utils, docutils
 from qutebrowser.browser import pdfjs
-from helpers import utils as testutils
+from helpers import testutils
 
 
 def _get_echo_exe_path():
@@ -73,7 +73,8 @@ def pytest_runtest_makereport(item, call):
         # non-BDD ones.
         return
 
-    if sys.stdout.isatty() and item.config.getoption('--color') != 'no':
+    if ((sys.stdout.isatty() or testutils.ON_CI) and
+            item.config.getoption('--color') != 'no'):
         colors = {
             'failed': log.COLOR_ESCAPES['red'],
             'passed': log.COLOR_ESCAPES['green'],
@@ -89,6 +90,9 @@ def pytest_runtest_makereport(item, call):
         }
 
     output = []
+    if testutils.ON_CI:
+        output.append(testutils.gha_group_begin('Scenario'))
+
     output.append("{kw_color}Feature:{reset} {name}".format(
         kw_color=colors['keyword'],
         name=report.scenario['feature']['name'],
@@ -113,6 +117,9 @@ def pytest_runtest_makereport(item, call):
                 duration=step['duration'],
                 reset=colors['reset'])
         )
+
+    if testutils.ON_CI:
+        output.append(testutils.gha_group_end())
 
     report.longrepr.addsection("BDD scenario", '\n'.join(output))
 
@@ -175,7 +182,7 @@ def clean_open_tabs(quteproc):
     """Clean up open windows and tabs."""
     quteproc.set_setting('tabs.last_close', 'blank')
     quteproc.send_cmd(':window-only')
-    quteproc.send_cmd(':tab-only --force')
+    quteproc.send_cmd(':tab-only --pinned close')
     quteproc.send_cmd(':tab-close --force')
     quteproc.wait_for_load_finished_url('about:blank')
 
@@ -184,6 +191,11 @@ def clean_open_tabs(quteproc):
 def pdfjs_available(data_tmpdir):
     if not pdfjs.is_available():
         pytest.skip("No pdfjs installation found.")
+
+
+@bdd.given('I clear the log')
+def clear_log_lines(quteproc):
+    quteproc.clear_data()
 
 
 ## When
@@ -282,7 +294,7 @@ def run_command(quteproc, server, tmpdir, command):
 @bdd.when(bdd.parsers.parse("I reload"))
 def reload(qtbot, server, quteproc, command):
     """Reload and wait until a new request is received."""
-    with qtbot.waitSignal(server.new_request):
+    with qtbot.wait_signal(server.new_request):
         quteproc.send_cmd(':reload')
 
 
@@ -366,9 +378,10 @@ def hint(quteproc, args):
 @bdd.when(bdd.parsers.parse('I hint with args "{args}" and follow {letter}'))
 def hint_and_follow(quteproc, args, letter):
     args = args.replace('(testdata)', testutils.abs_datapath())
+    args = args.replace('(python-executable)', sys.executable)
     quteproc.send_cmd(':hint {}'.format(args))
     quteproc.wait_for(message='hints: *')
-    quteproc.send_cmd(':follow-hint {}'.format(letter))
+    quteproc.send_cmd(':hint-follow {}'.format(letter))
 
 
 @bdd.when("I wait until the scroll position changed")
@@ -549,6 +562,9 @@ def check_header(quteproc, header, value):
     print(data)
     if value == '<unset>':
         assert header not in data['headers']
+    elif value.startswith("'") and value.endswith("'"):  # literal match
+        actual = data['headers'][header]
+        assert actual == value[1:-1]
     else:
         actual = data['headers'][header]
         assert testutils.pattern_match(pattern=value, value=actual)

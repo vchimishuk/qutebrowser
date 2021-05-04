@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,18 +15,22 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
-# pylint: disable=invalid-name,abstract-method
+# pylint: disable=abstract-method
 
 """Fake objects/stubs."""
 
+from typing import Any, Callable, Tuple
 from unittest import mock
 import contextlib
 import shutil
+import dataclasses
+import builtins
+import importlib
+import types
 
-import attr
-from PyQt5.QtCore import pyqtSignal, QPoint, QProcess, QObject, QUrl
+from PyQt5.QtCore import pyqtSignal, QPoint, QProcess, QObject, QUrl, QByteArray
 from PyQt5.QtGui import QIcon
 from PyQt5.QtNetwork import (QNetworkRequest, QAbstractNetworkCache,
                              QNetworkCacheMetaData)
@@ -116,13 +120,7 @@ class FakeQApplication:
     UNSET = object()
 
     def __init__(self, *, style=None, all_widgets=None, active_window=None,
-                 instance=UNSET, arguments=None, platform_name=None):
-
-        if instance is self.UNSET:
-            self.instance = mock.Mock(return_value=self)
-        else:
-            self.instance = mock.Mock(return_value=instance)
-
+                 arguments=None, platform_name=None):
         self.style = mock.Mock(spec=QCommonStyle)
         self.style().metaObject().className.return_value = style
 
@@ -195,13 +193,18 @@ class FakeNetworkReply:
         self.headers[key] = value
 
 
-def fake_qprocess():
-    """Factory for a QProcess mock which has the QProcess enum values."""
-    m = mock.Mock(spec=QProcess)
-    for name in ['NormalExit', 'CrashExit', 'FailedToStart', 'Crashed',
-                 'Timedout', 'WriteError', 'ReadError', 'UnknownError']:
-        setattr(m, name, getattr(QProcess, name))
-    return m
+class FakeProcess(QProcess):
+
+    def __init__(self, parent: QObject = None) -> None:
+        super().__init__(parent)
+        self.start = mock.Mock(spec=QProcess.start)
+        self.startDetached = mock.Mock(spec=QProcess.startDetached)
+        self.readAllStandardOutput = mock.Mock(
+            spec=QProcess.readAllStandardOutput, return_value=QByteArray(b''))
+        self.readAllStandardError = mock.Mock(
+            spec=QProcess.readAllStandardError, return_value=QByteArray(b''))
+        self.terminate = mock.Mock(spec=QProcess.terminate)
+        self.kill = mock.Mock(spec=QProcess.kill)
 
 
 class FakeWebTabScroller(browsertab.AbstractScroller):
@@ -286,6 +289,12 @@ class FakeWebTab(browsertab.AbstractTab):
     def icon(self):
         return QIcon()
 
+    def renderer_process_pid(self):
+        return None
+
+    def load_url(self, url):
+        self._url = url
+
 
 class FakeSignal:
 
@@ -327,20 +336,20 @@ class FakeSignal:
         """
 
 
-@attr.s(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class FakeCommand:
 
     """A simple command stub which has a description."""
 
-    name = attr.ib('')
-    desc = attr.ib('')
-    hide = attr.ib(False)
-    debug = attr.ib(False)
-    deprecated = attr.ib(False)
-    completion = attr.ib(None)
-    maxsplit = attr.ib(None)
-    takes_count = attr.ib(lambda: False)
-    modes = attr.ib((usertypes.KeyMode.normal, ))
+    name: str = ''
+    desc: str = ''
+    hide: bool = False
+    debug: bool = False
+    deprecated: bool = False
+    completion: Any = None
+    maxsplit: int = None
+    takes_count: Callable[[], bool] = lambda: False
+    modes: Tuple[usertypes.KeyMode] = (usertypes.KeyMode.normal, )
 
 
 class FakeTimer(QObject):
@@ -481,9 +490,10 @@ class TabbedBrowserStub(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.widget = TabWidgetStub()
-        self.shutting_down = False
+        self.is_shutting_down = False
         self.loaded_url = None
         self.cur_url = None
+        self.undo_stack = None
 
     def on_tab_close_requested(self, idx):
         del self.widget.tabs[idx]
@@ -624,15 +634,21 @@ class FakeHistoryProgress:
 
     """Fake for a WebHistoryProgress object."""
 
-    def __init__(self):
+    def __init__(self, *, raise_on_tick=False):
         self._started = False
         self._finished = False
         self._value = 0
+        self._raise_on_tick = raise_on_tick
 
-    def start(self, _text, _maximum):
+    def start(self, _text):
         self._started = True
 
+    def set_maximum(self, _maximum):
+        pass
+
     def tick(self):
+        if self._raise_on_tick:
+            raise Exception('tick-tock')
         self._value += 1
 
     def finish(self):
@@ -657,6 +673,9 @@ class FakeHintManager:
     def handle_partial_key(self, keystr):
         self.keystr = keystr
 
+    def current_mode(self):
+        return 'letter'
+
 
 class FakeWebEngineProfile:
 
@@ -666,8 +685,71 @@ class FakeWebEngineProfile:
 
 class FakeCookieStore:
 
-    def __init__(self, has_cookie_filter):
+    def __init__(self):
         self.cookie_filter = None
-        if has_cookie_filter:
-            self.setCookieFilter = (
-                lambda func: setattr(self, 'cookie_filter', func))  # noqa
+
+    def setCookieFilter(self, func):
+        self.cookie_filter = func
+
+
+class ImportFake:
+
+    """A fake for __import__ which is used by the import_fake fixture.
+
+    Attributes:
+        modules: A dict mapping module names to bools. If True, the import will
+                 succeed. Otherwise, it'll fail with ImportError.
+        version_attribute: The name to use in the fake modules for the version
+                           attribute.
+        version: The version to use for the modules.
+        _real_import: Saving the real __import__ builtin so the imports can be
+                      done normally for modules not in self. modules.
+    """
+
+    def __init__(self, modules, monkeypatch):
+        self._monkeypatch = monkeypatch
+        self.modules = modules
+        self.version_attribute = '__version__'
+        self.version = '1.2.3'
+        self._real_import = builtins.__import__
+        self._real_importlib_import = importlib.import_module
+
+    def patch(self):
+        """Patch import functions."""
+        self._monkeypatch.setattr(builtins, '__import__', self.fake_import)
+        self._monkeypatch.setattr(
+            importlib, 'import_module', self.fake_importlib_import)
+
+    def _do_import(self, name):
+        """Helper for fake_import and fake_importlib_import to do the work.
+
+        Return:
+            The imported fake module, or None if normal importing should be
+            used.
+        """
+        if name not in self.modules:
+            # Not one of the modules to test -> use real import
+            return None
+        elif self.modules[name]:
+            ns = types.SimpleNamespace()
+            if self.version_attribute is not None:
+                setattr(ns, self.version_attribute, self.version)
+            return ns
+        else:
+            raise ImportError("Fake ImportError for {}.".format(name))
+
+    def fake_import(self, name, *args, **kwargs):
+        """Fake for the builtin __import__."""
+        module = self._do_import(name)
+        if module is not None:
+            return module
+        else:
+            return self._real_import(name, *args, **kwargs)
+
+    def fake_importlib_import(self, name):
+        """Fake for importlib.import_module."""
+        module = self._do_import(name)
+        if module is not None:
+            return module
+        else:
+            return self._real_importlib_import(name)

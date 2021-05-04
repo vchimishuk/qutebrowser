@@ -1,6 +1,6 @@
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # This file is part of qutebrowser.
 #
@@ -15,33 +15,33 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Configuration storage and config-related utilities."""
 
 import copy
 import contextlib
 import functools
-import typing
-from typing import Any
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Mapping,
+                    MutableMapping, MutableSequence, Optional, Tuple, cast)
 
 from PyQt5.QtCore import pyqtSignal, QObject, QUrl
 
+from qutebrowser.commands import cmdexc, parser
 from qutebrowser.config import configdata, configexc, configutils
 from qutebrowser.utils import utils, log, urlmatch
 from qutebrowser.misc import objects
 from qutebrowser.keyinput import keyutils
 
-if typing.TYPE_CHECKING:
-    from typing import Tuple, MutableMapping
+if TYPE_CHECKING:
     from qutebrowser.config import configcache, configfiles
     from qutebrowser.misc import savemanager
 
 # An easy way to access the config from other code via config.val.foo
-val = typing.cast('ConfigContainer', None)
-instance = typing.cast('Config', None)
-key_instance = typing.cast('KeyConfig', None)
-cache = typing.cast('configcache.ConfigCache', None)
+val = cast('ConfigContainer', None)
+instance = cast('Config', None)
+key_instance = cast('KeyConfig', None)
+cache = cast('configcache.ConfigCache', None)
 
 # Keeping track of all change filters to validate them later.
 change_filters = []
@@ -84,7 +84,7 @@ class change_filter:  # noqa: N801,N806 pylint: disable=invalid-name
                 not configdata.is_valid_prefix(self._option)):
             raise configexc.NoOptionError(self._option)
 
-    def check_match(self, option: typing.Optional[str]) -> bool:
+    def check_match(self, option: Optional[str]) -> bool:
         """Check if the given option matches the filter."""
         if option is None:
             # Called directly, not from a config change event.
@@ -97,7 +97,7 @@ class change_filter:  # noqa: N801,N806 pylint: disable=invalid-name
         else:
             return False
 
-    def __call__(self, func: typing.Callable) -> typing.Callable:
+    def __call__(self, func: Callable) -> Callable:
         """Filter calls to the decorated function.
 
         Gets called when a function should be decorated.
@@ -115,7 +115,7 @@ class change_filter:  # noqa: N801,N806 pylint: disable=invalid-name
         """
         if self._function:
             @functools.wraps(func)
-            def func_wrapper(option: str = None) -> typing.Any:
+            def func_wrapper(option: str = None) -> Any:
                 """Call the underlying function."""
                 if self.check_match(option):
                     return func()
@@ -123,8 +123,7 @@ class change_filter:  # noqa: N801,N806 pylint: disable=invalid-name
             return func_wrapper
         else:
             @functools.wraps(func)
-            def meth_wrapper(wrapper_self: typing.Any,
-                             option: str = None) -> typing.Any:
+            def meth_wrapper(wrapper_self: Any, option: str = None) -> Any:
                 """Call the underlying function."""
                 if self.check_match(option):
                     return func(wrapper_self)
@@ -142,7 +141,7 @@ class KeyConfig:
         _config: The Config object to be used.
     """
 
-    _ReverseBindings = typing.Dict[str, typing.MutableSequence[str]]
+    _ReverseBindings = Dict[str, MutableSequence[str]]
 
     def __init__(self, config: 'Config') -> None:
         self._config = config
@@ -154,10 +153,7 @@ class KeyConfig:
         if mode not in configdata.DATA['bindings.default'].default:
             raise configexc.KeybindingError("Invalid mode {}!".format(mode))
 
-    def get_bindings_for(
-            self,
-            mode: str
-    ) -> typing.Dict[keyutils.KeySequence, str]:
+    def get_bindings_for(self, mode: str) -> Dict[keyutils.KeySequence, str]:
         """Get the combined bindings for the given mode."""
         bindings = dict(val.bindings.default[mode])
         for key, binding in val.bindings.commands[mode].items():
@@ -167,13 +163,38 @@ class KeyConfig:
                 bindings[key] = binding
         return bindings
 
+    def _implied_cmd(self, cmdline: str) -> Optional[str]:
+        """Return cmdline, or the implied cmd if cmdline is a set-cmd-text."""
+        try:
+            results = parser.CommandParser().parse_all(cmdline)
+        except cmdexc.NoSuchCommandError:
+            return None
+
+        result = results[0]
+        if result.cmd.name != "set-cmd-text":
+            return cmdline
+        *flags, cmd = result.args
+        if "-a" in flags or "--append" in flags or not cmd.startswith(":"):
+            return None  # doesn't look like this sets a command
+        return cmd.lstrip(":")
+
     def get_reverse_bindings_for(self, mode: str) -> '_ReverseBindings':
-        """Get a dict of commands to a list of bindings for the mode."""
-        cmd_to_keys = {}  # type: KeyConfig._ReverseBindings
+        """Get a dict of commands to a list of bindings for the mode.
+
+        This is intented for user-facing display of keybindings.
+        As such, bindings for 'set-cmd-text [flags] :<cmd> ...' are translated
+        to '<cmd> ...', as from the user's perspective these keys behave like
+        bindings for '<cmd>' (that allow for further input before running).
+
+        See #5942.
+        """
+        cmd_to_keys: KeyConfig._ReverseBindings = {}
         bindings = self.get_bindings_for(mode)
         for seq, full_cmd in sorted(bindings.items()):
-            for cmd in full_cmd.split(';;'):
-                cmd = cmd.strip()
+            for cmdtext in full_cmd.split(';;'):
+                cmd = self._implied_cmd(cmdtext.strip())
+                if not cmd:
+                    continue
                 cmd_to_keys.setdefault(cmd, [])
                 # Put bindings involving modifiers last
                 if any(info.modifiers for info in seq):
@@ -185,7 +206,7 @@ class KeyConfig:
     def get_command(self,
                     key: keyutils.KeySequence,
                     mode: str,
-                    default: bool = False) -> typing.Optional[str]:
+                    default: bool = False) -> Optional[str]:
         """Get the command for a given key (or None)."""
         self._validate(key, mode)
         if default:
@@ -278,7 +299,7 @@ class Config(QObject):
                  yaml_config: 'configfiles.YamlConfig',
                  parent: QObject = None) -> None:
         super().__init__(parent)
-        self._mutables = {}  # type: MutableMapping[str, Tuple[Any, Any]]
+        self._mutables: MutableMapping[str, Tuple[Any, Any]] = {}
         self._yaml = yaml_config
         self._init_values()
         self.yaml_loaded = False
@@ -286,11 +307,11 @@ class Config(QObject):
 
     def _init_values(self) -> None:
         """Populate the self._values dict."""
-        self._values = {}  # type: typing.Mapping
+        self._values: Mapping = {}
         for name, opt in configdata.DATA.items():
             self._values[name] = configutils.Values(opt)
 
-    def __iter__(self) -> typing.Iterator[configutils.Values]:
+    def __iter__(self) -> Iterator[configutils.Values]:
         """Iterate over configutils.Values items."""
         yield from self._values.values()
 
@@ -391,7 +412,7 @@ class Config(QObject):
 
     def get_obj_for_pattern(
             self, name: str, *,
-            pattern: typing.Optional[urlmatch.UrlPattern]
+            pattern: Optional[urlmatch.UrlPattern]
     ) -> Any:
         """Get the given setting as object (for YAML/config.py).
 
@@ -479,8 +500,12 @@ class Config(QObject):
 
     def unset(self, name: str, *,
               save_yaml: bool = False,
-              pattern: urlmatch.UrlPattern = None) -> None:
-        """Set the given setting back to its default."""
+              pattern: urlmatch.UrlPattern = None) -> bool:
+        """Set the given setting back to its default.
+
+        Return:
+            True if there was a change, False if nothing changed.
+        """
         opt = self.get_opt(name)
         self._check_yaml(opt, save_yaml)
         changed = self._values[name].remove(pattern)
@@ -489,6 +514,8 @@ class Config(QObject):
 
         if save_yaml:
             self._yaml.unset(name, pattern=pattern)
+
+        return changed
 
     def clear(self, *, save_yaml: bool = False) -> None:
         """Clear all settings in the config.
@@ -525,7 +552,7 @@ class Config(QObject):
         Return:
             The changed config part as string.
         """
-        lines = []  # type: typing.List[str]
+        lines: List[str] = []
         for values in sorted(self, key=lambda v: v.opt.name):
             lines += values.dump()
 
@@ -564,7 +591,7 @@ class ConfigContainer:
                               pattern=self._pattern)
 
     @contextlib.contextmanager
-    def _handle_error(self, action: str, name: str) -> typing.Iterator[None]:
+    def _handle_error(self, action: str, name: str) -> Iterator[None]:
         try:
             yield
         except configexc.Error as e:
@@ -572,6 +599,15 @@ class ConfigContainer:
                 raise
             text = "While {} '{}'".format(action, name)
             self._configapi.errors.append(configexc.ConfigErrorDesc(text, e))
+
+    def _with_prefix(self, prefix: str) -> 'ConfigContainer':
+        """Get a new ConfigContainer for the given prefix."""
+        return ConfigContainer(
+            config=self._config,
+            configapi=self._configapi,
+            pattern=self._pattern,
+            prefix=prefix,
+        )
 
     def __getattr__(self, attr: str) -> Any:
         """Get an option or a new ConfigContainer with the added prefix.
@@ -587,9 +623,7 @@ class ConfigContainer:
 
         name = self._join(attr)
         if configdata.is_valid_prefix(name):
-            return ConfigContainer(config=self._config,
-                                   configapi=self._configapi,
-                                   prefix=name, pattern=self._pattern)
+            return self._with_prefix(name)
 
         with self._handle_error('getting', name):
             if self._configapi is None:
@@ -599,6 +633,13 @@ class ConfigContainer:
                 # access from config.py
                 return self._config.get_mutable_obj(
                     name, pattern=self._pattern)
+
+        # If we arrived here, there was an error while getting the config option. Most
+        # likely, someone did something like "c.content.host_blocking.lists" but
+        # "c.content.host_blocking" doesn't actually exist. To avoid an AttributeError
+        # which leads to a confusing error message, return another ConfigContainer so
+        # that the chain can keep going.
+        return self._with_prefix(name)  # type: ignore[unreachable]
 
     def __setattr__(self, attr: str, value: Any) -> None:
         """Set the given option in the config."""
@@ -614,5 +655,4 @@ class ConfigContainer:
         """Get the prefix joined with the given attribute."""
         if self._prefix:
             return '{}.{}'.format(self._prefix, attr)
-        else:
-            return attr
+        return attr

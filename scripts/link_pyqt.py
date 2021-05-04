@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # vim: ft=python fileencoding=utf-8 sts=4 sw=4 et:
 
-# Copyright 2014-2020 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# Copyright 2014-2021 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
 
 # This file is part of qutebrowser.
 #
@@ -16,7 +16,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with qutebrowser.  If not, see <http://www.gnu.org/licenses/>.
+# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
 
 """Symlink PyQt into a given virtualenv."""
 
@@ -199,7 +199,9 @@ def get_tox_syspython(tox_path):
     with open(path, encoding='ascii') as f:
         line = f.readline()
     _md5, sys_python = line.rstrip().split(' ', 1)
-    return sys_python
+    # Follow symlinks to get the system-wide interpreter if we have a tox isolated
+    # build.
+    return os.path.realpath(sys_python)
 
 
 def main():
