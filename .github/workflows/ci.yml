@@ -32,6 +32,8 @@ jobs:
           - testenv: yamllint
     steps:
       - uses: actions/checkout@v2
+        with:
+          persist-credentials: false
       - uses: actions/cache@v2
         with:
           path: |
@@ -88,6 +90,8 @@ jobs:
       options: --privileged --tty
     steps:
       - uses: actions/checkout@v2
+        with:
+          persist-credentials: false
       - name: Set up problem matchers
         run: "python scripts/dev/ci/problemmatchers.py py38 ${{ runner.temp }}"
       - name: Run tox
@@ -124,7 +128,7 @@ jobs:
           ### PyQt 5.15 (Python 3.10)
           - testenv: py310-pyqt515
             os: ubuntu-20.04
-            python: 3.10.0-alpha.7
+            python: 3.10-dev
           ### macOS: PyQt 5.15 (Python 3.9 to match PyInstaller env)
           - testenv: py39-pyqt515
             os: macos-10.15
@@ -142,6 +146,8 @@ jobs:
     runs-on: "${{ matrix.os }}"
     steps:
       - uses: actions/checkout@v2
+        with:
+          persist-credentials: false
       - uses: actions/cache@v2
         with:
           path: |
@@ -181,11 +187,15 @@ jobs:
 
   codeql:
     if: "!contains(github.event.head_commit.message, '[ci skip]')"
+    permissions:
+      security-events: write
     timeout-minutes: 30
     runs-on: ubuntu-20.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
+        with:
+          persist-credentials: false
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v1
         with:
@@ -205,16 +215,16 @@ jobs:
         uses: Gottox/irc-message-action@v1
         if: "needs.linters.result == 'success' && needs.tests.result == 'success' && needs.tests-docker.result == 'success' && needs.codeql.result == 'success'"
         with:
-          server: chat.freenode.net
-          channel: '#qutebrowser-dev'
+          server: irc.libera.chat
+          channel: '#qutebrowser-bots'
           nickname: qutebrowser-bot
           message: "[${{ github.workflow }}] \u00033Success:\u0003 ${{ github.ref }} https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} (@${{ github.actor }})"
       - name: Send failure IRC notification
         uses: Gottox/irc-message-action@v1
         if: "needs.linters.result == 'failure' || needs.tests.result == 'failure' || needs.tests-docker.result == 'failure' || needs.codeql.result == 'failure'"
         with:
-          server: chat.freenode.net
-          channel: '#qutebrowser-dev'
+          server: irc.libera.chat
+          channel: '#qutebrowser-bots'
           nickname: qutebrowser-bot
           message: "[${{ github.workflow }}] \u00034FAIL:\u0003 ${{ github.ref }} https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} (@${{ github.actor }})\n
             linters: ${{ needs.linters.result }}, tests: ${{ needs.tests.result }}, tests-docker: ${{ needs.tests-docker.result }}, codeql: ${{ needs.codeql.result }}"
@@ -222,16 +232,16 @@ jobs:
         uses: Gottox/irc-message-action@v1
         if: "needs.linters.result == 'skipped' || needs.tests.result == 'skipped' || needs.tests-docker.result == 'skipped' || needs.codeql.result == 'skipped'"
         with:
-          server: chat.freenode.net
-          channel: '#qutebrowser-dev'
+          server: irc.libera.chat
+          channel: '#qutebrowser-bots'
           nickname: qutebrowser-bot
           message: "[${{ github.workflow }}] \u00038Skipped:\u0003 ${{ github.ref }} https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} (@${{ github.actor }})"
       - name: Send cancelled IRC notification
         uses: Gottox/irc-message-action@v1
         if: "needs.linters.result == 'cancelled' || needs.tests.result == 'cancelled' || needs.tests-docker.result == 'cancelled' || needs.codeql.result == 'cancelled'"
         with:
-          server: chat.freenode.net
-          channel: '#qutebrowser-dev'
+          server: irc.libera.chat
+          channel: '#qutebrowser-bots'
           nickname: qutebrowser-bot
           message: "[${{ github.workflow }}] \u000314Cancelled:\u0003 ${{ github.ref }} https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} (@${{ github.actor }})\n
             linters: ${{ needs.linters.result }}, tests: ${{ needs.tests.result }}, tests-docker: ${{ needs.tests-docker.result }}, codeql: ${{ needs.codeql.result }}"
