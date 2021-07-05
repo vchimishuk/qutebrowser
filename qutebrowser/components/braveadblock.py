@@ -165,6 +165,11 @@ class BraveAdBlocker:
         self._cache_path = data_dir / "adblock-cache.dat"
         self._engine = adblock.Engine(adblock.FilterSet())
 
+    def _is_youtube_ad(self, url: QUrl) -> bool:
+        # https://blog.iancaling.com/attempting-to-block-youtube-ads-on-a-tcl-roku-tv/
+        return (url.host().endswith('googlevideo.com')
+                and '&ctier=L&' in url.query())
+
     def _is_blocked(
         self,
         request_url: QUrl,
@@ -194,6 +199,10 @@ class BraveAdBlocker:
             # Do nothing if adblocking is disabled for this site.
             return False
 
+        if self._is_youtube_ad(request_url):
+            logger.info('Blocked Youtube ad request {}'.format(request_url))
+            return True
+
         result = self._engine.check_network_urls(
             request_url.toString(),
             first_party_url.toString(),
@@ -222,6 +231,7 @@ class BraveAdBlocker:
                 request_url.toDisplayString(),
             )
             return False
+
         return True
 
     def filter_request(self, info: interceptor.Request) -> None:
