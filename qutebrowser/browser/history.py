@@ -135,12 +135,44 @@ class CompletionHistory(sql.SqlTable):
 
     def __init__(self, database: sql.Database,
                  parent: Optional[QObject] = None) -> None:
-        super().__init__(database, "CompletionHistory", ['url', 'title', 'last_atime'],
-                         constraints={'url': 'PRIMARY KEY',
-                                      'title': 'NOT NULL',
-                                      'last_atime': 'NOT NULL'},
+        super().__init__(database, "CompletionHistory",
+                         ['url', 'title', 'first_atime', 'last_atime', 'visits', 'frecency'],
+                         {'url': 'PRIMARY KEY',
+                          'title': 'NOT NULL',
+                          'first_atime': 'NOT NULL',
+                          'last_atime': 'NOT NULL',
+                          'visits': 'INTEGER NOT NULL',
+                          'frecency': 'INTEGER NOT NULL'},
                          parent=parent)
         self.create_index('CompletionHistoryAtimeIndex', 'last_atime')
+        self.create_index('CompletionHistoryUrlIndex', 'url', unique=True)
+        self.create_index('CompletionHistoryFrecencyIndex', 'frecency')
+
+    def add(self, url, title, atime):
+        values = {'url': url,
+                  'title': title,
+                  'first_atime': atime,
+                  'last_atime': atime,
+                  'visits': 1,
+                  'frecency': 1}
+        update = {'last_atime': atime,
+                  'visits': 'visits + 1',
+                  # TODO: Use full frecency formula here?
+                  'frecency': 'frecency + 1'}
+
+        self.upsert(values, 'url', update)
+
+    def update_frecency(self):
+        day_secs = 60 * 60 * 24
+        today = int(time.time())
+        s = ('UPDATE ' + self._name + ' SET '
+             'frecency = visits '
+             '* (MAX(last_atime - first_atime, :day_secs) / :day_secs) '
+             '/ ((MAX(:today - last_atime, :day_secs) / :day_secs) '
+             '* (MAX(:today - last_atime, :day_secs) / :day_secs)) ')
+        q = self.database.query(s)
+
+        q.run(today=today, day_secs=day_secs)
 
 
 class WebHistory(sql.SqlTable):
@@ -206,6 +238,12 @@ class WebHistory(sql.SqlTable):
             # If no history exists, we don't need to spawn a dialog for
             # cleaning it up.
             self._rebuild_completion()
+
+        ts = time.time()
+        log.misc.info("Updating completion history frecency score...")
+        self.completion.update_frecency()
+        log.misc.info(f"Completion history recency score recalculation "
+                      f"took {time.time() - ts:.3f} seconds.")
 
         self.create_index('HistoryIndex', 'url')
         self.create_index('HistoryAtimeIndex', 'atime')
@@ -282,7 +320,10 @@ class WebHistory(sql.SqlTable):
         data: Mapping[str, MutableSequence[str]] = {
             'url': [],
             'title': [],
-            'last_atime': []
+            'first_atime': [],
+            'last_atime': [],
+            'visits': [],
+            'frecency': [],
         }
 
         self._progress.start(
@@ -296,9 +337,15 @@ class WebHistory(sql.SqlTable):
         QApplication.processEvents()
 
         # Select the latest entry for each url
-        q = self.database.query('SELECT url, title, max(atime) AS atime FROM History '
-                                'WHERE NOT redirect '
-                                'GROUP BY url ORDER BY atime asc')
+        q = self.database.query("SELECT "
+                                "    url, "
+                                "    title, "
+                                "    MIN(atime) AS first_atime, "
+                                "    MAX(atime) AS last_atime, "
+                                "    COUNT(*) AS visits "
+                                "FROM History "
+                                "WHERE NOT redirect "
+                                "GROUP BY url ORDER BY atime ASC")
         result = q.run()
         QApplication.processEvents()
         entries = list(result)
@@ -313,7 +360,10 @@ class WebHistory(sql.SqlTable):
                 continue
             data['url'].append(self._format_completion_url(url))
             data['title'].append(entry.title)
-            data['last_atime'].append(entry.atime)
+            data['first_atime'].append(entry.first_atime)
+            data['last_atime'].append(entry.last_atime)
+            data['visits'].append(entry.visits)
+            data['frecency'].append('0')
 
         self._progress.set_maximum(0)
 
@@ -421,11 +471,7 @@ class WebHistory(sql.SqlTable):
             if redirect or self._is_excluded_from_completion(url):
                 return
 
-            self.completion.insert({
-                'url': self._format_completion_url(url),
-                'title': title,
-                'last_atime': atime
-            }, replace=True)
+            self.completion.add(self._format_completion_url(url), title, atime)
 
     def _format_url(self, url):
         return url.toString(QUrl.UrlFormattingOption.RemovePassword | QUrl.ComponentFormattingOption.FullyEncoded)

@@ -461,7 +461,7 @@ class SqlTable(QObject):
         )
         q.run()
 
-    def create_index(self, name: str, field: str) -> None:
+    def create_index(self, name: str, field: str, unique=False) -> None:
         """Create an index over this table if the database is uninitialized.
 
         Args:
@@ -471,8 +471,9 @@ class SqlTable(QObject):
         if not self.database.user_version_changed():
             return
 
+        u = 'UNIQUE' if unique else ''
         q = self.database.query(
-            f"CREATE INDEX IF NOT EXISTS {name} ON {self._name} ({field})"
+            f"CREATE {u} INDEX IF NOT EXISTS {name} ON {self._name} ({field})"
         )
         q.run()
 
@@ -568,6 +569,19 @@ class SqlTable(QObject):
         )
         q.run(limit=limit)
         return q
+
+    def upsert(self, values: Mapping[str, Any], index: str,
+               update: Mapping[str, Any]) -> None:
+        cols = ', '.join(values)
+        vals = ', '.join(f':{key}' for key in values)
+        # TODO: Use SQL placeholders?
+        upd = ', '.join(f'{key} = {val}' for key, val in update.items())
+        q = self.database.query(f"INSERT INTO {self._name} ({cols}) "
+                                f"VALUES ({vals}) "
+                                f"ON CONFLICT ({index}) "
+                                f"DO UPDATE SET {upd}")
+        q.run(**values)
+        self.changed.emit()
 
 
 def version() -> str:
