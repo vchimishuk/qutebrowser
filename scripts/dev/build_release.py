@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 
-# SPDX-FileCopyrightText: Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# SPDX-FileCopyrightText: Freya Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """Build a new release."""
 
+from __future__ import annotations
 
 import os
 import sys
@@ -20,13 +21,20 @@ import platform
 import collections
 import dataclasses
 import re
-from typing import Optional
+import http
+from typing import Optional, TYPE_CHECKING
 from collections.abc import Iterable
 
 try:
     import winreg
 except ImportError:
     pass
+
+if TYPE_CHECKING:
+    import github3
+    import github3.repos.release
+
+import requests
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -126,7 +134,7 @@ def _smoke_test_run(
     return subprocess.run(argv, check=True, capture_output=True)
 
 
-def smoke_test(executable: pathlib.Path, debug: bool) -> None:
+def smoke_test(executable: pathlib.Path, debug_build: bool) -> None:
     """Try starting the given qutebrowser executable."""
     stdout_whitelist = []
     stderr_whitelist = [
@@ -173,6 +181,13 @@ def smoke_test(executable: pathlib.Path, debug: bool) -> None:
             # Qt 6.7, only seen on macos for some reason
             (r'.*Path override failed for key base::DIR_APP_DICTIONARIES '
              r"and path '.*/qtwebengine_dictionaries'"),
+
+            # Qt 6.9 on macOS
+            r'Compositor returned null texture',
+
+            # Qt 6.10
+            (r'\[.*:ERROR:service_utils.cc\([0-9]*\)\] '
+             r'Skia Graphite backend = "" not found - falling back to Ganesh!'),
         ])
     elif IS_WINDOWS:
         stderr_whitelist.extend([
@@ -181,10 +196,27 @@ def smoke_test(executable: pathlib.Path, debug: bool) -> None:
             (r'\[.*:ERROR:dxva_video_decode_accelerator_win.cc\(\d+\)\] '
             r'DXVAVDA fatal error: could not LoadLibrary: .*: The specified '
             r'module could not be found. \(0x7E\)'),
+            # Qt 6.10
+            (r'\[.*:ERROR:direct_composition_support.cc\([0-9]*\)\] '
+             r'GetGpuDriverOverlayInfo: Failed to retrieve video device'),
+            (r'\[.*:ERROR:direct_composition_support.cc\([0-9]*\)\] QueryInterface '
+             r'to IDCompositionDevice4 failed: No such interface supported '
+             r'\(0x80004002\)'),
         ])
 
-    proc = _smoke_test_run(executable)
-    if debug:
+    try:
+        proc = _smoke_test_run(executable)
+    except subprocess.CalledProcessError as e:
+        print(f"Smoke test failed: {e}, running with --debug")
+        smoke_test_debug(
+            executable,
+            original_stdout=e.stdout.decode("utf-8"),
+            original_stderr=e.stderr.decode("utf-8"),
+            issue_description=str(e),
+        )
+        return
+
+    if debug_build:
         print("Skipping output check for debug build")
         return
 
@@ -193,48 +225,64 @@ def smoke_test(executable: pathlib.Path, debug: bool) -> None:
 
     if stdout or stderr:
         print("Unexpected output, running with --debug")
-        proc = _smoke_test_run(executable, '--debug')
-        debug_stdout = proc.stdout.decode('utf-8')
-        debug_stderr = proc.stderr.decode('utf-8')
+        smoke_test_debug(
+            executable,
+            original_stdout=stdout,
+            original_stderr=stderr,
+            issue_description="Unexpected output",
+        )
 
-        lines = [
-            "Unexpected output!",
+
+def smoke_test_debug(
+    executable: pathlib.Path,
+    *,
+    original_stdout: str,
+    original_stderr: str,
+    issue_description: str,
+) -> None:
+    """Run smoke test in debug mode to get more output."""
+    proc = _smoke_test_run(executable, '--debug')
+    debug_stdout = proc.stdout.decode('utf-8')
+    debug_stderr = proc.stderr.decode('utf-8')
+
+    lines = [
+        issue_description,
+        "",
+    ]
+    if original_stdout:
+        lines += [
+            "stdout",
+            "------",
+            "",
+            original_stdout,
             "",
         ]
-        if stdout:
-            lines += [
-                "stdout",
-                "------",
-                "",
-                stdout,
-                "",
-            ]
-        if stderr:
-            lines += [
-                "stderr",
-                "------",
-                "",
-                stderr,
-                "",
-            ]
-        if debug_stdout:
-            lines += [
-                "debug rerun stdout",
-                "------------------",
-                "",
-                debug_stdout,
-                "",
-            ]
-        if debug_stderr:
-            lines += [
-                "debug rerun stderr",
-                "------------------",
-                "",
-                debug_stderr,
-                "",
-            ]
+    if original_stderr:
+        lines += [
+            "stderr",
+            "------",
+            "",
+            original_stderr,
+            "",
+        ]
+    if debug_stdout:
+        lines += [
+            "debug rerun stdout",
+            "------------------",
+            "",
+            debug_stdout,
+            "",
+        ]
+    if debug_stderr:
+        lines += [
+            "debug rerun stderr",
+            "------------------",
+            "",
+            debug_stderr,
+            "",
+        ]
 
-        raise Exception("\n".join(lines))  # pylint: disable=broad-exception-raised
+    raise Exception("\n".join(lines))  # pylint: disable=broad-exception-raised
 
 
 def verify_windows_exe(exe_path: pathlib.Path) -> None:
@@ -290,7 +338,7 @@ def build_mac(
     dist_path = pathlib.Path("dist")
 
     utils.print_title("Running pre-dmg smoke test")
-    smoke_test(_mac_bin_path(dist_path), debug=debug)
+    smoke_test(_mac_bin_path(dist_path), debug_build=debug)
 
     if skip_packaging:
         return []
@@ -313,7 +361,7 @@ def build_mac(
             subprocess.run(['hdiutil', 'attach', dmg_path,
                             '-mountpoint', tmp_path], check=True)
             try:
-                smoke_test(_mac_bin_path(tmp_path), debug=debug)
+                smoke_test(_mac_bin_path(tmp_path), debug_build=debug)
             finally:
                 print("Waiting 10s for dmg to be detachable...")
                 time.sleep(10)
@@ -372,7 +420,7 @@ def _build_windows_single(
     verify_windows_exe(exe_path)
 
     utils.print_title("Running smoke test")
-    smoke_test(exe_path, debug=debug)
+    smoke_test(exe_path, debug_build=debug)
 
     if skip_packaging:
         return []
@@ -548,11 +596,36 @@ def read_github_token(
     return token
 
 
+def _github_find_release(
+    gh: github3.GitHub, tag: str, experimental: bool
+) -> github3.repos.release.Release:
+    if experimental:
+        repo = gh.repository('qutebrowser', 'experiments')
+    else:
+        repo = gh.repository('qutebrowser', 'qutebrowser')
+    assert repo is not None
+
+    for release in repo.releases():
+        if release.tag_name == tag:
+            return release
+
+    releases = ", ".join(r.tag_name for r in repo.releases())
+    raise Exception(  # pylint: disable=broad-exception-raised
+        f"No release found for {tag!r} in {repo.full_name}, found: {releases}")
+
+
+def _github_assets(
+    release: github3.repos.release.Release, artifact: Artifact
+) -> list[github3.repos.release.Asset]:
+    return [asset for asset in release.assets() if asset.name == artifact.path.name]
+
+
 def github_upload(
     artifacts: list[Artifact],
     tag: str,
     gh_token: str,
     experimental: bool,
+    skip_if_exists: bool,
 ) -> None:
     """Upload the given artifacts to GitHub.
 
@@ -561,35 +634,25 @@ def github_upload(
         tag: The name of the release tag
         gh_token: The GitHub token to use
         experimental: Upload to the experiments repo
+        skip_if_exists: Skip uploading artifacts that already exist
     """
-    # pylint: disable=broad-exception-raised
     import github3
     import github3.exceptions
     utils.print_title("Uploading to github...")
 
     gh = github3.login(token=gh_token)
-
-    if experimental:
-        repo = gh.repository('qutebrowser', 'experiments')
-    else:
-        repo = gh.repository('qutebrowser', 'qutebrowser')
-
-    release = None  # to satisfy pylint
-    for release in repo.releases():
-        if release.tag_name == tag:
-            break
-    else:
-        releases = ", ".join(r.tag_name for r in repo.releases())
-        raise Exception(
-            f"No release found for {tag!r} in {repo.full_name}, found: {releases}")
+    assert gh is not None
+    release = _github_find_release(gh=gh, tag=tag, experimental=experimental)
 
     for artifact in artifacts:
+        if _github_assets(release, artifact) and skip_if_exists:
+            print(f"Artifact {artifact.path.name} already exists, skipping")
+            continue
+
         while True:
             print(f"Uploading {artifact.path}")
 
-            assets = [asset for asset in release.assets()
-                      if asset.name == artifact.path.name]
-            if assets:
+            if (assets := _github_assets(release, artifact)):
                 print(f"Assets already exist: {assets}")
 
                 if utils.ON_CI:
@@ -617,9 +680,7 @@ def github_upload(
 
                 print("Retrying!")
 
-                assets = [asset for asset in release.assets()
-                          if asset.name == artifact.path.name]
-                if assets:
+                if (assets := _github_assets(release, artifact)):
                     stray_asset = assets[0]
                     print(f"Deleting stray asset {stray_asset.name}")
                     stray_asset.delete()
@@ -627,12 +688,29 @@ def github_upload(
                 break
 
 
-def pypi_upload(artifacts: list[Artifact], experimental: bool) -> None:
+def check_pypi_exists(version: str) -> bool:
+    """Check whether the given version exists on PyPI."""
+    response = requests.get(
+        f"https://pypi.org/pypi/qutebrowser/{version}/json", timeout=30
+    )
+    if response.status_code == http.HTTPStatus.NOT_FOUND:
+        return False
+    response.raise_for_status()
+    return bool(response.json()["urls"])
+
+
+def pypi_upload(
+    artifacts: list[Artifact], experimental: bool, skip_if_exists: bool
+) -> None:
     """Upload the given artifacts to PyPI using twine."""
+    utils.print_title("Uploading to PyPI...")
+    if skip_if_exists and check_pypi_exists(qutebrowser.__version__):
+        print(f"Version {qutebrowser.__version__} already exists on PyPI, skipping")
+        return
+
     # https://blog.pypi.org/posts/2023-05-23-removing-pgp/
     artifacts = [a for a in artifacts if a.mimetype != 'application/pgp-signature']
 
-    utils.print_title("Uploading to PyPI...")
     if experimental:
         run_twine('upload', artifacts, "-r", "testpypi")
     else:
@@ -658,6 +736,8 @@ def main() -> None:
                         nargs='?')
     parser.add_argument('--upload', action='store_true', required=False,
                         help="Toggle to upload the release to GitHub.")
+    parser.add_argument('--reupload', action='store_true', required=False,
+                        help="Skip uploading artifacts that already exist.")
     parser.add_argument('--no-confirm', action='store_true', required=False,
                         help="Skip confirmation before uploading.")
     parser.add_argument('--skip-packaging', action='store_true', required=False,
@@ -717,9 +797,16 @@ def main() -> None:
 
         assert gh_token is not None
         github_upload(
-            artifacts, version_tag, gh_token=gh_token, experimental=args.experimental)
+            artifacts,
+            version_tag,
+            gh_token=gh_token,
+            experimental=args.experimental,
+            skip_if_exists=args.reupload,
+        )
         if upload_to_pypi:
-            pypi_upload(artifacts, experimental=args.experimental)
+            pypi_upload(
+                artifacts, experimental=args.experimental, skip_if_exists=args.reupload
+            )
     else:
         print()
         utils.print_title("Artifacts")

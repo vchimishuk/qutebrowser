@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# SPDX-FileCopyrightText: Freya Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -356,9 +356,8 @@ class ConfigCommands:
             raise cmdutils.CommandError(":config-list-remove can only be used "
                                         "for lists")
 
-        converted = opt.typ.valtype.from_str(value)
-
         with self._handle_config_error():
+            converted = opt.typ.valtype.from_str(value)
             option_value = self._config.get_mutable_obj(option)
 
             if converted not in option_value:

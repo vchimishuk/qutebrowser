@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# SPDX-FileCopyrightText: Freya Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -417,6 +417,43 @@ def _init_profile(profile: QWebEngineProfile) -> None:
         lambda url: profile.clearVisitedLinks([url]))
 
     _global_settings.init_settings()
+    _maybe_disable_hangouts_extension(profile)
+
+
+def _maybe_disable_hangouts_extension(profile: QWebEngineProfile) -> None:
+    """Disable the Hangouts extension for Qt 6.10+."""
+    qtwe_versions = version.qtwebengine_versions(avoid_init=True)
+    if not (
+        config.val.qt.workarounds.disable_hangouts_extension
+        # https://qt-project.atlassian.net/browse/QTBUG-145467
+        or qtwe_versions.webengine == utils.VersionNumber(6, 11)
+        # earlier hardcoded disables handled in pakjoy.py
+    ):
+        return
+
+    if machinery.IS_QT6:  # mypy
+        try:
+            ext_manager = profile.extensionManager()
+        except AttributeError:
+            return  # added in QtWebEngine 6.10
+
+        if (
+            qtwe_versions.webengine
+            in [utils.VersionNumber(6, 10, 1), utils.VersionNumber(6, 10, 2)]
+            and profile.isOffTheRecord()
+        ):
+            # WORKAROUND for https://github.com/qutebrowser/qutebrowser/issues/8785
+            log.misc.warning(
+                "Not disabling Hangouts extension on private profile to avoid "
+                "QtWebEngine crash with Qt 6.10.1/.2")
+            return
+
+        assert ext_manager is not None  # mypy
+        for info in ext_manager.extensions():
+            if info.id() == pakjoy.HANGOUTS_EXT_ID:
+                log.misc.debug(f"Disabling extension: {info.name()}")
+                # setExtensionEnabled(info, False) seems to segfault
+                ext_manager.unloadExtension(info)
 
 
 def _clear_webengine_permissions_json():
@@ -438,14 +475,18 @@ def _clear_webengine_permissions_json():
         )
 
 
+def default_qt_profile() -> QWebEngineProfile:
+    """Get the default profile from Qt."""
+    if machinery.IS_QT6:
+        return QWebEngineProfile("Default")
+    else:
+        return QWebEngineProfile.defaultProfile()
+
+
 def _init_default_profile():
     """Init the default QWebEngineProfile."""
     global default_profile
-
-    if machinery.IS_QT6:
-        default_profile = QWebEngineProfile("Default")
-    else:
-        default_profile = QWebEngineProfile.defaultProfile()
+    default_profile = default_qt_profile()
     assert not default_profile.isOffTheRecord()
 
     assert parsed_user_agent is None  # avoid earlier profile initialization
@@ -453,8 +494,19 @@ def _init_default_profile():
 
     init_user_agent()
     ua_version = version.qtwebengine_versions()
+
+    logger = log.init.warning
+    if machinery.IS_QT5:
+        # With Qt 5.15, we can't quite be sure about which QtWebEngine patch version
+        # we're getting, as ELF parsing might be broken and there's no other way.
+        # For most of the code, we don't really care about the patch version though.
+        assert (
+            non_ua_version.webengine.strip_patch() == ua_version.webengine.strip_patch()
+        ), (non_ua_version, ua_version)
+        logger = log.init.debug
+
     if ua_version.webengine != non_ua_version.webengine:
-        log.init.warning(
+        logger(
             "QtWebEngine version mismatch - unexpected behavior might occur, "
             "please open a bug about this.\n"
             f"  Early version: {non_ua_version}\n"
@@ -495,7 +547,21 @@ def _init_site_specific_quirks():
     #               "{qt_key}/{qt_version} "
     #               "{upstream_browser_key}/{upstream_browser_version_short} "
     #               "Safari/{webkit_version}")
-    firefox_ua = "Mozilla/5.0 ({os_info}; rv:136.0) Gecko/20100101 Firefox/136.0"
+    firefox_ua = "Mozilla/5.0 ({os_info}; rv:149.0) Gecko/20100101 Firefox/149.0"
+
+    # Needed for gitlab.gnome.org which blocks old Chromium versions outright,
+    # except when QtWebEngine/... is in the UA.
+    #
+    # We could further modify the UA to just "qutebrowser" or something so we don't get
+    # Anubis at all, but it looks like their Anubis triggers to more than just
+    # Mozilla/5.0 (also AppleWebKit/... and Chromium/... possibly?), so at that point
+    # I'm not sure if we can strip down the UA so much without breaking
+    # something in GitLab as well.
+    not_mozilla_ua = (
+        "Mozilla/5.0 ({os_info}) AppleWebKit/{webkit_version} (KHTML, like Gecko) "
+        "{qt_key}/{qt_version} {upstream_browser_key}/{upstream_browser_version_short} "
+        "Safari/{webkit_version}"
+    )
 
     def maybe_newer_chrome_ua(at_least_version):
         """Return a new UA if our current chrome version isn't at least at_least_version."""
@@ -517,6 +583,7 @@ def _init_site_specific_quirks():
         # to keep your account secure" error.
         # https://github.com/qutebrowser/qutebrowser/issues/5182
         ("ua-google", "https://accounts.google.com/*", firefox_ua),
+        ("ua-gnome-gitlab", "https://gitlab.gnome.org/*", not_mozilla_ua),
     ]
 
     for name, pattern, ua in user_agents:

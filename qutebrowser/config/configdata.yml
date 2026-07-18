@@ -391,7 +391,7 @@ qt.workarounds.disable_accelerated_2d_canvas:
     name: String
     valid_values:
       - always: Disable accelerated 2d canvas
-      - auto: Disable on Qt6 < 6.6.0, enable otherwise
+      - auto: Disable on Qt versions with known issues, enable otherwise
       - never: Enable accelerated 2d canvas
   default: auto
   backend: QtWebEngine
@@ -420,7 +420,20 @@ qt.workarounds.disable_hangouts_extension:
 
     Note this setting gets ignored and the Hangouts extension is always
     disabled to avoid crashes on Qt 6.5.0 to 6.5.3 if dark mode is enabled,
-    as well as on Qt 6.6.0.
+    as well as on Qt 6.6.0 and Qt 6.11.0.
+
+qt.workarounds.disable_accessibility:
+  type:
+    name: String
+    valid_values:
+      - always: Disable renderer accessibility
+      - auto: Disable on Qt versions with known issues, enable otherwise
+      - never: Enable renderer accessibility
+  default: auto
+  backend: QtWebEngine
+  restart: true
+  desc: >-
+    Disable accessibility to avoid crashes on Qt 6.10.1.
 
 ## auto_save
 
@@ -658,6 +671,7 @@ content.site_specific_quirks.skip:
     valid_values:
       - ua-google
       - ua-googledocs
+      - ua-gnome-gitlab
       - js-whatsapp-web
       - js-discord
       - js-string-replaceall
@@ -772,14 +786,14 @@ content.headers.user_agent:
       # Vim-protip: Place your cursor below this comment and run
       # :r!python scripts/dev/ua_fetch.py
       - - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
-          (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
-        - Chrome 135 macOS
+          (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+        - Chrome 146 macOS
       - - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
-          like Gecko) Chrome/135.0.0.0 Safari/537.36"
-        - Chrome 135 Win10
+          like Gecko) Chrome/146.0.0.0 Safari/537.36"
+        - Chrome 146 Win10
       - - "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like
-          Gecko) Chrome/135.0.0.0 Safari/537.36"
-        - Chrome 135 Linux
+          Gecko) Chrome/146.0.0.0 Safari/537.36"
+        - Chrome 146 Linux
   supports_pattern: true
   desc: |
     User agent to send.
@@ -1602,6 +1616,7 @@ fileselect.single_file.command:
       - ['["xterm", "-e", "nnn", "-p", "{}"]', "nnn in xterm"]
       - ['["xterm", "-e", "fff", "-p", "{}"]', "fff in xterm"]
       - ['["xterm", "-e", "lf", "-selection-path", "{}"]', "lf in xterm"]
+      - ['["xterm", "-e", "yazi", "--chooser-file", "{}"]', "yazi in xterm"]
   default: ['xterm', '-e', 'ranger', '--choosefile={}']
   desc: >-
     Command (and arguments) to use for selecting a single file in forms.
@@ -1622,6 +1637,7 @@ fileselect.multiple_files.command:
       - ['["xterm", "-e", "nnn", "-p", "{}"]', "nnn in xterm"]
       - ['["xterm", "-e", "fff", "-p", "{}"]', "fff in xterm"]
       - ['["xterm", "-e", "lf", "-selection-path", "{}"]', "lf in xterm"]
+      - ['["xterm", "-e", "yazi", "--chooser-file", "{}"]', "yazi in xterm"]
   default: ['xterm', '-e', 'ranger', '--choosefiles={}']
   desc: >-
     Command (and arguments) to use for selecting multiple files in forms.
@@ -1641,6 +1657,7 @@ fileselect.folder.command:
       - ['["xterm", "-e", "ranger", "--choosedir={}"]', "Ranger in xterm"]
       - ['["xterm", "-e", "vifm", "--choose-dir", "{}"]', "vifm in xterm"]
       - ['["xterm", "-e", "nnn", "-p", "{}"]', "nnn in xterm"]
+      - ['["xterm", "-e", "yazi", "--cwd-file", "{}"]', "yazi in xterm"]
   default: ['xterm', '-e', 'ranger', '--choosedir={}']
   desc: >-
     Command (and arguments) to use for selecting a single folder in forms.

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# SPDX-FileCopyrightText: Freya Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -417,7 +417,7 @@ def update_documentation():
     try:
         subprocess.run(['asciidoc'], stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, check=True)
-    except OSError:
+    except (OSError, subprocess.CalledProcessError):
         pytest.skip("Docs outdated and asciidoc unavailable!")
 
     update_script = os.path.join(script_path, 'asciidoc2html.py')

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# SPDX-FileCopyrightText: Freya Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -858,6 +858,7 @@ def test_chunk_invalid(n):
 @pytest.mark.parametrize('filename, expected', [
     ('test.jpg', 'image/jpeg'),
     ('test.blabla', 'application/octet-stream'),
+    ('test.mjs', 'text/javascript'),
 ])
 def test_guess_mimetype(filename, expected):
     assert utils.guess_mimetype(filename, fallback=True) == expected

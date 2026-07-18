@@ -27,7 +27,6 @@ jobs:
           - testenv: vulture
           - testenv: misc
           - testenv: pyroma
-          - testenv: check-manifest
           - testenv: eslint
           - testenv: shellcheck
             args: "-f gcc"  # For problem matchers
@@ -35,20 +34,20 @@ jobs:
           - testenv: actionlint
           - testenv: package
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             .mypy_cache
             .tox
             ~/.cache/pip
           key: "${{ matrix.testenv }}-${{ hashFiles('misc/requirements/requirements-*.txt') }}-${{ hashFiles('requirements.txt') }}-${{ hashFiles('scripts/dev/pylint_checkers/qute_pylint/*.py') }}"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.10'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22.x'
         if: "matrix.testenv == 'eslint'"
@@ -91,16 +90,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - testenv: py-qt5
-            image: archlinux-webkit
-          - testenv: py-qt5
+          - testenv: py
             image: archlinux-webengine
-          - testenv: py-qt5
+          - testenv: py
             image: archlinux-webengine-unstable
-          - testenv: py
-            image: archlinux-webengine-qt6
-          - testenv: py
-            image: archlinux-webengine-unstable-qt6
     container:
       image: "qutebrowser/ci:${{ matrix.image }}"
       env:
@@ -113,7 +106,7 @@ jobs:
         - /home/runner/work/_temp/:/home/runner/work/_temp/
       options: --privileged --tty
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: Set up problem matchers
@@ -128,7 +121,7 @@ jobs:
         shell: bash
         if: failure()
       - name: Upload screenshots
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: "end2end-screenshots-${{ steps.info.outputs.date }}-${{ steps.info.outputs.sha_short }}-${{ matrix.image }}"
           path: |
@@ -144,10 +137,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          ### PyQt 5.15.2 (Python 3.9)
-          - testenv: py39-pyqt5152
+          ### PyQt 5.15.2 (Python 3.10)
+          - testenv: py310-pyqt5152
             os: ubuntu-22.04
-            python: "3.9"
+            python: "3.10"
           ### PyQt 5.15 (Python 3.10, with coverage)
           # FIXME:qt6
           # - testenv: py310-pyqt515-cov
@@ -157,18 +150,18 @@ jobs:
           - testenv: py311-pyqt515
             os: ubuntu-22.04
             python: "3.11"
-          ### PyQt 6.2 (Python 3.9)
-          - testenv: py39-pyqt62
+          ### PyQt 6.2 (Python 3.10)
+          - testenv: py310-pyqt62
             os: ubuntu-22.04
-            python: "3.9"
-          ### PyQt 6.3 (Python 3.9)
-          - testenv: py39-pyqt63
+            python: "3.10"
+          ### PyQt 6.3 (Python 3.10)
+          - testenv: py310-pyqt63
             os: ubuntu-22.04
-            python: "3.9"
-          ## PyQt 6.4 (Python 3.9)
-          - testenv: py39-pyqt64
+            python: "3.10"
+          ## PyQt 6.4 (Python 3.10)
+          - testenv: py310-pyqt64
             os: ubuntu-22.04
-            python: "3.9"
+            python: "3.10"
           ### PyQt 6.5 (Python 3.10)
           - testenv: py310-pyqt65
             os: ubuntu-22.04
@@ -193,34 +186,45 @@ jobs:
           - testenv: py313-pyqt68
             os: ubuntu-24.04
             python: "3.13"
-          ### PyQt 6.8 (Python 3.14)
-          - testenv: py314-pyqt68
-            os: ubuntu-24.04
-            python: "3.14-dev"
-          ### PyQt 6.9 (Python 3.13)
-          - testenv: py313-pyqt69
-            os: ubuntu-24.04
-            python: "3.13"
-          ### macOS Ventura
+          ### PyQt 6.8 (Python 3.13)
           - testenv: py313-pyqt68
-            os: macos-13
+            os: ubuntu-24.04
             python: "3.13"
-            args: "tests/unit"  # Only run unit tests on macOS
+          ### PyQt 6.9 (Python 3.14)
+          - testenv: py314-pyqt69
+            os: ubuntu-24.04
+            python: "3.14"
+          ### PyQt 6.10 (Python 3.14)
+          - testenv: py314-pyqt610
+            os: ubuntu-24.04
+            python: "3.14"
+          ### PyQt 6.11 (Python 3.14)
+          - testenv: py314-pyqt611
+            os: ubuntu-24.04
+            python: "3.14"
           ### macOS Sonoma (M1 runner)
-          - testenv: py313-pyqt68
+          - testenv: py314-pyqt611
             os: macos-14
-            python: "3.13"
+            python: "3.14"
+            args: "tests/unit"  # Only run unit tests on macOS
+          ### macOS Sequoia (Intel runner)
+          - testenv: py314-pyqt611
+            os: macos-15-intel
+            python: "3.14"
             args: "tests/unit"  # Only run unit tests on macOS
           ### Windows
-          - testenv: py313-pyqt68
-            os: windows-2019
-            python: "3.13"
+          - testenv: py314-pyqt611
+            os: windows-2022
+            python: "3.14"
+          - testenv: py314-pyqt611
+            os: windows-2025
+            python: "3.14"
     runs-on: "${{ matrix.os }}"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             .mypy_cache
@@ -228,7 +232,7 @@ jobs:
             ~/.cache/pip
           key: "${{ matrix.testenv }}-${{ matrix.os }}-${{ matrix.python }}-${{ hashFiles('misc/requirements/requirements-*.txt') }}-${{ hashFiles('requirements.txt') }}"
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "${{ matrix.python }}"
       - name: Set up problem matchers
@@ -258,7 +262,7 @@ jobs:
         if: "failure()"
       - name: Upload coverage
         if: "endsWith(matrix.testenv, '-cov')"
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           name: "${{ matrix.testenv }}"
       - name: Gather info
@@ -269,7 +273,7 @@ jobs:
         shell: bash
         if: failure()
       - name: Upload screenshots
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: "end2end-screenshots-${{ steps.info.outputs.date }}-${{ steps.info.outputs.sha_short }}-${{ matrix.testenv }}-${{ matrix.os }}"
           path: |
@@ -285,16 +289,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: javascript, python
           queries: +security-extended
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
 
   irc:
     timeout-minutes: 2

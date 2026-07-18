@@ -386,6 +386,13 @@ Feature: Various utility commands.
         And I run :jseval console.log(window.navigator.userAgent)
         Then the header User-Agent should be set to toaster
 
+    Scenario: User-agent header with redirect
+        When I run :set -u localhost content.headers.user_agent toaster
+        And I open redirect-to?url=headers without waiting
+        And I wait until headers is loaded
+        And I run :jseval console.log(window.navigator.userAgent)
+        Then the header User-Agent should be set to toaster
+
     Scenario: User-agent header (JS)
         When I set content.headers.user_agent to toaster
         And I open about:blank
@@ -593,8 +600,10 @@ Feature: Various utility commands.
 
     ## Renderer crashes
 
-    # Skipped on Windows as "... has stopped working" hangs.
-    @qtwebkit_skip @no_invalid_lines @posix
+    # Disabled because for unknown reasons, on more modern systems,
+    # navigating to chrome://crash hangs for ~40s before displaying the crash
+    # message.
+    @xfail_norun
     Scenario: Renderer crash
         When I run :open -t chrome://crash
         Then "Renderer process crashed (status *)" should be logged

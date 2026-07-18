@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# SPDX-FileCopyrightText: Freya Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -21,6 +21,7 @@ import pytest
 from qutebrowser.qt.core import QProcess, QPoint
 
 from helpers import testutils
+from end2end.fixtures import quteprocess
 from qutebrowser.utils import qtutils, utils, version
 
 
@@ -251,6 +252,7 @@ def test_optimize(request, quteproc_new, capfd, level):
 def test_version(request):
     """Test invocation with --version argument."""
     args = ['-m', 'qutebrowser', '--version'] + _base_args(request.config)
+    args.remove("--json-logging")
     # can't use quteproc_new here because it's confused by
     # early process termination
     proc = QProcess()
@@ -609,6 +611,29 @@ def test_service_worker_workaround(
         quteproc_new.ensure_not_logged(message='Removing service workers at *')
     else:
         assert not service_worker_dir.exists()
+
+
+@pytest.mark.qt6_only
+def test_disable_hangouts_extension_crash(
+    quteproc_new: quteprocess.QuteProc,
+    request: pytest.FixtureRequest,
+    webengine_versions: version.WebEngineVersions,
+):
+    """Make sure disabling the Hangouts extension doesn't crash."""
+    args = _base_args(request.config) + [
+        '--temp-basedir',
+        '-s', 'qt.workarounds.disable_hangouts_extension', 'true',
+    ]
+    quteproc_new.start(args)
+    if webengine_versions.webengine in [
+        utils.VersionNumber(6, 10, 1),
+        utils.VersionNumber(6, 10, 2),
+    ]:
+        line = quteproc_new.wait_for(message="Not disabling Hangouts extension *")
+        line.expected = True
+
+    quteproc_new.send_cmd(':quit')
+    quteproc_new.wait_for_quit()
 
 
 @pytest.mark.parametrize('store', [True, False])
@@ -1039,11 +1064,13 @@ def test_restart(request, quteproc_new):
     pid = int(line.message.removeprefix(prefix))
     os.kill(pid, signal.SIGTERM)
 
-    try:
-        # If the new process hangs, this will hang too.
-        # Still better than just ignoring it, so we can fix it if something is broken.
-        os.waitpid(pid, 0)  # pid, options... positional-only :(
-    except (ChildProcessError, PermissionError):
-        # Already gone. Even if not documented, Windows seems to raise PermissionError
-        # here...
-        pass
+    # This often hangs on Windows for unknown reasons
+    if not utils.is_windows:
+        try:
+            # If the new process hangs, this will hang too.
+            # Still better than just ignoring it, so we can fix it if something is broken.
+            os.waitpid(pid, 0)  # pid, options... positional-only :(
+        except (ChildProcessError, PermissionError):
+            # Already gone. Even if not documented, Windows seems to raise PermissionError
+            # here...
+            pass

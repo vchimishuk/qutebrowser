@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# SPDX-FileCopyrightText: Freya Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -6,11 +6,12 @@
 
 from qutebrowser.qt import machinery
 from qutebrowser.qt.core import QObject, QEvent, Qt, QTimer
+from qutebrowser.qt.gui import QKeyEvent
 from qutebrowser.qt.widgets import QWidget
 
 from qutebrowser.config import config
-from qutebrowser.utils import log, message, usertypes, qtutils
-from qutebrowser.keyinput import modeman
+from qutebrowser.utils import log, message, usertypes, qtutils, version, utils
+from qutebrowser.keyinput import modeman, keyutils
 
 
 class ChildEventFilter(QObject):
@@ -37,8 +38,8 @@ class ChildEventFilter(QObject):
         if event.type() == QEvent.Type.ChildAdded:
             child = event.child()
             if not isinstance(child, QWidget):
-                # Can e.g. happen when dragging text
-                log.misc.debug(f"Ignoring new child {qtutils.qobj_repr(child)}")
+                # Can e.g. happen when dragging text, or accessibility tree
+                # nodes since Qt 6.9
                 return False
 
             log.misc.debug(
@@ -54,21 +55,30 @@ class ChildEventFilter(QObject):
                 # - This is a child event filter on a tab (self._widget is not None)
                 # - We find an old existing child which is a QQuickWidget and is
                 #   currently focused.
-                # - We're using QtWebEngine >= 6.4 (older versions are not affected)
+                # - We're using an affected QtWebEngine version
                 children = [
                     c for c in self._widget.findChildren(
                         QWidget, "", Qt.FindChildOption.FindDirectChildrenOnly)
                     if c is not child and
                     c.hasFocus() and
                     c.metaObject() is not None and
-                    c.metaObject().className() == "QQuickWidget"
+                    c.metaObject().className() == "QQuickWidget"  # Qt 6.4+
                 ]
-                if children:
+                if children and version.qtwebengine_versions().webengine < utils.VersionNumber(6, 6, 3):
                     log.misc.debug("Focusing new child")
                     child.setFocus()
 
             child.installEventFilter(self._filter)
         elif event.type() == QEvent.Type.ChildRemoved:
+            if isinstance(event, QKeyEvent):
+                # WORKAROUND for unknown (Py)Qt bug
+                info = keyutils.KeyInfo.from_event(event)
+                log.misc.warning(
+                    f"ChildEventFilter: ignoring key event {info} "
+                    f"on {qtutils.qobj_repr(obj)}"
+                )
+                return False
+
             child = event.child()
             log.misc.debug(
                 f"{qtutils.qobj_repr(obj)}: removed child {qtutils.qobj_repr(child)}")

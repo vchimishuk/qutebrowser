@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Imran Sobir
-# SPDX-FileCopyrightText: Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# SPDX-FileCopyrightText: Freya Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -15,6 +15,36 @@ import pytest
 from qutebrowser.browser import qutescheme, pdfjs, downloads
 from qutebrowser.utils import resources, urlmatch
 from qutebrowser.misc import guiprocess
+
+
+class TestDataForUrl:
+    @pytest.mark.parametrize(
+        "url, expected",
+        [
+            # QUrl.UrlFormattingOption.StripTrailingSlash
+            (QUrl("qute://abc/xyz/"), QUrl("qute://abc/xyz")),
+            # QUrl.UrlFormattingOption.NormalizePathSegments
+            (QUrl("qute://abc/uvw/../xyz"), QUrl("qute://abc/xyz")),
+            # Adding host trailing slash
+            (QUrl("qute://abc"), QUrl("qute://abc/")),
+            (QUrl("qute://abc?q=42"), QUrl("qute://abc/?q=42")),
+            # path -> host
+            (QUrl("qute:abc"), QUrl("qute://abc/")),
+            (QUrl("qute:abc?q=42"), QUrl("qute://abc/?q=42")),
+        ],
+        ids=lambda url: url.toString(),
+    )
+    def test_redirects(self, url: QUrl, expected: QUrl) -> None:
+        with pytest.raises(qutescheme.Redirect) as exc:
+            qutescheme.data_for_url(url)
+        assert exc.value.url == expected
+
+    def test_invalid_redirect(self) -> None:
+        url = QUrl("qute:-")
+        with pytest.raises(
+            qutescheme.UrlInvalidError, match=r"Invalid host \(from path\): '-'"
+        ):
+            qutescheme.data_for_url(url)
 
 
 class TestJavascriptHandler:

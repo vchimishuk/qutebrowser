@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 
-# SPDX-FileCopyrightText: Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+# SPDX-FileCopyrightText: Freya Bruhin (The Compiler) <mail@qutebrowser.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 
 """Generate Dockerfiles for qutebrowser's CI."""
 
-import sys
 import argparse
 
 import jinja2
 
 
 CONFIGS = {
-    'archlinux-webkit': {'webengine': False, 'unstable': False, 'qt6': False},
-    'archlinux-webengine': {'webengine': True, 'unstable': False, 'qt6': False},
-    'archlinux-webengine-qt6': {'webengine': True, 'unstable': False, 'qt6': True},
-    'archlinux-webengine-unstable': {'webengine': True, 'unstable': True, 'qt6': False},
-    'archlinux-webengine-unstable-qt6': {'webengine': True, 'unstable': True, 'qt6': True},
+    'archlinux-webengine': {'unstable': False},
+    'archlinux-webengine-unstable': {'unstable': True},
 }
 
 
